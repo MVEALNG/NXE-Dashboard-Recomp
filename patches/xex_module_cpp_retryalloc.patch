@@ -1,0 +1,23 @@
+--- src/system/xex_module.cpp.bak-retryalloc	2026-08-30 18:15:50.334301900 -0500
++++ src/system/xex_module.cpp	2026-08-30 18:18:01.215610500 -0500
+@@ -1016,6 +1016,20 @@
+   if (result_code) {
+     REXLOG_WARN("XEX load failed with code {}, trying with devkit encryption key...", result_code);
+ 
++    // Give the image's memory back before trying the other key.
++    //
++    // ReadImage reserves and commits at base_address_ before it can know
++    // whether the key was right, and it does not undo that when it fails. The
++    // retry then asks for the same fixed address, AllocFixed refuses because it
++    // is already taken, and the attempt dies with code 2 -- an allocation
++    // failure wearing the costume of a decryption failure. So the second key has
++    // never actually been tried: the pair of codes in the log, 3 then 2, is one
++    // real answer followed by an artefact.
++    auto* heap = memory()->LookupHeap(base_address_);
++    const bool released = heap ? heap->Release(base_address_) : false;
++    REXLOG_WARN("XEX retry: base {:#010x}, heap {}, release {}", base_address_,
++                heap ? "found" : "null", released ? "ok" : "FAILED");
++
+     result_code = ReadImage(xex_addr, xex_length, true);
+     if (result_code) {
+       REXLOG_ERROR("XEX load failed with code {}, tried both encryption keys", result_code);

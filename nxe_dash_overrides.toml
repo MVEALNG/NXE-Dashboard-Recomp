@@ -1,0 +1,44 @@
+# Analysis overrides for $flash_dash.xex, merged via [entrypoint].includes.
+#
+# Each address below is the target of an unconditional `b` (a tail call) that
+# landed outside every discovered function, so Validate reported
+# "UnresolvedCall ... target not in any function". Declaring the address
+# registers it as a function start; size/end are left unset so the analyzer
+# still determines the extent itself.
+[functions]
+0x9213F2C8 = {}
+0x9230FB70 = {}
+0x92311DC0 = {}
+0x924416D0 = {}
+0x924BDBE0 = {}
+0x924C4A18 = {}
+0x92633A10 = {}
+
+
+# The XEX entry point. XEX2 optional header 0x00010100 gives entry 0x92146DC8
+# (0x00010201 is the image base, 0x92000000). Discovery never emitted a function
+# here -- nothing in the image branches to it, since the kernel enters it
+# directly -- so the runtime aborted with
+# "XThread::Execute - No function registered at 92146DC8".
+0x92146DC8 = {}
+
+# Mid-function entry. 0x921BE268 lies between the emitted functions 0x921BE248
+# and 0x921BE288, so it was folded into its predecessor and never registered;
+# the runtime aborted with "Call to invalid or unregistered function at guest
+# address 0x921BE268". `parent` splits it out of the enclosing function.
+0x921BE268 = { parent = 0x921BE248 }
+
+# Reachable only once the device/profile stubs stopped returning garbage: the
+# dashboard took a new path and called into an address discovery never promoted
+# to a function ("Call to invalid or unregistered function at 0x924B77D0").
+0x924B77D0 = {}
+
+# Reached when opening the profile screen: discovery never promoted this address
+# to a function, so the runtime aborted with "Call to invalid or unregistered
+# function at 0x923018E8" -- which is what raised the CRT abort() dialog.
+0x923018E8 = {}
+
+# Reached when the profile blade is highlighted: discovery never promoted this
+# address to a function, so the runtime aborted with "Call to invalid or
+# unregistered function at guest address 0x92478898 (called from lr=0x92477...)".
+0x92478898 = {}

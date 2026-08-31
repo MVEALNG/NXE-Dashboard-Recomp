@@ -1,0 +1,10 @@
+// Windows resources for the dashboard executable.
+//
+// The icon is the dashboard's own Xbox logo, taken from the dumped assets
+// (Metro/DashcommAssets/xboxLogo.png) and converted to a multi-size .ico. The
+// source is 300x196, so it is letterboxed onto a transparent square rather than
+// stretched -- Explorer, the taskbar and Alt-Tab each pick the size they want.
+//
+// ID 1: the lowest-numbered icon resource is the one Windows uses for the
+// executable, so this must stay first.
+1 ICON "nxe.ico"

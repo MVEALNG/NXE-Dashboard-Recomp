@@ -1,0 +1,16 @@
+# Branch targets the scanner cannot attribute to a function -- the tail of a `b`
+# from inside another function, typically a shared epilogue or a vtable adjustor
+# thunk. Declaring them closes the call graph so Validate passes. Derived by
+# running codegen once and reading the UnresolvedCall list.
+[modules.functions]
+0x81861570 = { name = "sub_81861570" }
+0x81861630 = { name = "sub_81861630" }
+0x81741630 = { name = "sub_81741630" }
+0x818615D0 = { name = "sub_818615D0" }
+0x818614A0 = { name = "sub_818614A0" }
+0x8197DD10 = { name = "sub_8197DD10" }
+0x81741718 = { name = "sub_81741718" }
+0x817417B0 = { name = "sub_817417B0" }
+0x817121C8 = { name = "sub_817121C8" }
+0x819B47A8 = { name = "sub_819B47A8" }
+0x819D6900 = { name = "sub_819D6900" }

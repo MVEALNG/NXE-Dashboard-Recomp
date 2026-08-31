@@ -1,0 +1,286 @@
+--- src/kernel/xam/xam_avatar.cpp.bak-byxuid	2026-08-29 14:09:49.870481000 -0500
++++ src/kernel/xam/xam_avatar.cpp	2026-08-30 12:13:10.831152200 -0500
+@@ -134,6 +134,13 @@
+ // Legacy per-CWD manifest cache, still read as a fallback.
+ static const char* kLegacyMetaCachePath = "legacy_avatar_meta.bin";
+ 
++// Write time of the persisted manifest as last adopted, so a save made by the
++// Avatar Editor while the dashboard is running is noticed exactly once.
++static uint64_t g_manifest_stamp = 0;
++// Set once a manifest has been taken off disk rather than from the guest, and
++// cleared again when the guest finally hands us the same thing.
++static bool g_manifest_adopted = false;
++
+ REXCVAR_DEFINE_STRING(avatar_data_dir, "", "Kernel",
+                       "Shared cross-title folder for persisted avatar data: the manifest the "
+                       "Avatar Editor saves and every game then loads as the local user's "
+@@ -233,6 +240,7 @@
+     random_meta.owner_xuid = profile->xuid();  // player-owned, not an NPC build
+     const auto* bytes = reinterpret_cast<const uint8_t*>(&random_meta);
+     manifest.assign(bytes, bytes + sizeof(random_meta));
++    REXKRNL_WARN("[avatar] writing manifest from EnsureAvatarProfileSetting (fresh-user synth)");
+     WriteHostFile(AvatarManifestPath(), manifest.data(), manifest.size());
+   }
+   if (manifest.size() != sizeof(avatars::X_AVATAR_METADATA)) {
+@@ -437,14 +445,92 @@
+   return X_ERROR_IO_PENDING;
+ }
+ 
++static void BuildRandomAvatarMetadata(avatars::X_AVATAR_METADATA* out, uint32_t body_mask,
++                                      uint32_t salt);
++
++// Manifests for a list of XUIDs -- the dashboard's route to the player's avatar
++// (and to the ones on friends' gamercards).
++//
++// The player's own manifest is whatever is persisted: on the dashboard that is
++// the real one lifted out of the profile (setting 0x63E80044). Everyone else
++// gets a synthesized avatar seeded from their XUID, so a gamercard shows a
++// plausible stranger and is stable between reads rather than reshuffling.
+ u32 XamAvatarGetManifestsByXuid_entry(u32 user_index, u32 xuid_count, mapped_u64 xuid, u32 unk,
+                                       u32 avatar_info_ptr, mapped_void overlapped_ptr) {
+-  if (overlapped_ptr) {
+-    REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped_ptr.guest_address(),
+-                                                    X_ERROR_SUCCESS);
+-    return X_ERROR_IO_PENDING;
++  (void)user_index;
++  (void)unk;
++  const uint32_t xuid_addr = xuid.guest_address();
++
++  auto run = [=](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
++    extended_error = X_ERROR_SUCCESS;
++    length = 0;
++
++    // The guest wrapper already enforces these; check anyway so a different
++    // caller cannot walk off the end of its buffer.
++    if (!avatar_info_ptr || !xuid_count || xuid_count > 16) {
++      extended_error = X_E_INVALIDARG;
++      return X_ERROR_INVALID_PARAMETER;
++    }
++
++    auto* mem = REX_KERNEL_MEMORY();
++    auto* out = mem->TranslateVirtual<avatars::X_AVATAR_METADATA*>(avatar_info_ptr);
++    if (!out) {
++      extended_error = X_E_INVALIDARG;
++      return X_ERROR_INVALID_PARAMETER;
++    }
++    const auto* wanted =
++        xuid_addr ? mem->TranslateVirtual<const rex::be<uint64_t>*>(xuid_addr) : nullptr;
++
++    // Prefer the live capture, else what is on disk. Reading each call rather
++    // than caching means an avatar saved in the editor shows up on the next
++    // read without a restart.
++    const avatars::X_AVATAR_METADATA* player = nullptr;
++    avatars::X_AVATAR_METADATA persisted;
++    if (g_have_metadata) {
++      player = reinterpret_cast<const avatars::X_AVATAR_METADATA*>(g_captured_metadata);
++    } else {
++      auto data = ReadPersistedManifest(nullptr);
++      if (data.size() == sizeof(persisted)) {
++        std::memcpy(&persisted, data.data(), sizeof(persisted));
++        player = &persisted;
++      }
++    }
++    const uint64_t player_xuid =
++        player ? static_cast<uint64_t>(player->owner_xuid) : 0ull;
++
++    uint32_t served = 0;
++    for (uint32_t i = 0; i < xuid_count; ++i) {
++      const uint64_t want = wanted ? static_cast<uint64_t>(wanted[i]) : 0ull;
++      // A zero XUID means "the signed-in user"; so does a match on the
++      // manifest's own owner.
++      if (player && (want == 0ull || want == player_xuid)) {
++        std::memcpy(&out[i], player, sizeof(out[i]));
++        ++served;
++        continue;
++      }
++      if (LoadAvatarAssetPack()) {
++        BuildRandomAvatarMetadata(&out[i], 3, static_cast<uint32_t>(want) | 1u);
++        out[i].owner_xuid = want;
++      } else {
++        std::memset(&out[i], 0, sizeof(out[i]));
++      }
++    }
++
++    length = xuid_count * static_cast<uint32_t>(sizeof(avatars::X_AVATAR_METADATA));
++    REXKRNL_INFO("[avatar] GetManifestsByXuid: {} of {} from the player's manifest "
++                 "(owner {:016X})",
++                 served, xuid_count, player_xuid);
++    return X_ERROR_SUCCESS;
++  };
++
++  if (!overlapped_ptr) {
++    uint32_t extended_error = 0, length = 0;
++    X_RESULT result = run(extended_error, length);
++    return result == X_ERROR_SUCCESS ? result : extended_error;
+   }
+-  return X_STATUS_SUCCESS;
++
++  REX_KERNEL_STATE()->CompleteOverlappedDeferredEx(run, overlapped_ptr.guest_address());
++  return X_ERROR_IO_PENDING;
+ }
+ 
+ // Per-component CPU/GPU buffer sizes (avatars::ComponentCategory order).
+@@ -895,15 +981,142 @@
+       REXKRNL_WARN("[avatar] GetAssets: asset pack not loaded; cannot build avatar");
+       return X_ERROR_FUNCTION_FAILED;
+     }
++    // The version is a hint about which era the title expects, not a fact about
++    // where this manifest's assets are. The dashboard reports version 2 and so
++    // lands on the legacy pack, but its user manifests are modern.
++    //
++    // Probing one asset is not enough to tell the packs apart: the stock bodies
++    // exist in both, so a body-only check passes on the legacy pack and the
++    // avatar still builds with nothing but a body and head -- which is exactly
++    // what the blade was showing. Score the whole manifest against both packs
++    // and take the one that can actually dress it. A genuinely V1-era title
++    // scores higher on the legacy pack and keeps it.
++    if (pack == &g_legacy_avatar_asset_pack && LoadAvatarAssetPack()) {
++      const auto* probe_meta =
++          mem->TranslateVirtual<const avatars::X_AVATAR_METADATA*>(meta_addr);
++      auto score = [&](avatars::AssetPack* candidate) {
++        int found = 0;
++        const uint8_t* data = nullptr;
++        size_t size = 0;
++        auto has = [&](const avatars::AssetId& id) {
++          return !id.is_zero() && candidate->GetAssetData(id, data, size);
++        };
++        if (has(probe_meta->body_component.asset_id)) ++found;
++        if (has(probe_meta->head_component.asset_id)) ++found;
++        for (const auto& comp : probe_meta->components) {
++          if (has(comp.asset_id)) ++found;
++        }
++        return found;
++      };
++      const int legacy_score = score(&g_legacy_avatar_asset_pack);
++      const int modern_score = score(&g_avatar_asset_pack);
++
++      // Both scores, every time -- not only when the modern pack wins.
++      //
++      // Logging just the win made a loss indistinguishable from the check never
++      // running, and the two want opposite fixes. The dashboard was drawing a
++      // user's avatar on the v1 skeleton, which gives it noticeably longer arms
++      // than the editor's v2 render of the same manifest, and the only way to
++      // tell why was to see the numbers behind the decision.
++      static uint64_t s_reported = 0;
++      const uint64_t owner = static_cast<uint64_t>(probe_meta->owner_xuid);
++      if (s_reported != owner) {
++        s_reported = owner;
++        REXKRNL_INFO("[avatar] owner {:016X}: modern pack resolves {} asset(s), legacy {} "
++                     "(title reported version {})",
++                     owner, modern_score, legacy_score, g_title_version);
++      }
++
++      // A tie goes to the modern pack.
++      //
++      // The stock bodies and heads exist in both packs, so they contribute to
++      // both scores and a manifest whose only distinguishing components are
++      // modern can still come out level. The dashboard reports version 2 purely
++      // because of its era; the avatars it renders are the ones the editor
++      // wrote, and those are modern. A genuinely V1-era manifest still resolves
++      // strictly better on the legacy pack and keeps it.
++      if (modern_score >= legacy_score) {
++        REXKRNL_INFO("[avatar] building with the modern pack and skeleton v2");
++        pack = &g_avatar_asset_pack;
++        skeleton_version = 2;
++      }
++    }
+     const auto* metadata =
+         mem->TranslateVirtual<const avatars::X_AVATAR_METADATA*>(meta_addr);
++    const bool random_npc =
++        static_cast<uint64_t>(metadata->owner_xuid) == kRandomAvatarXuid;
++
++    // Has the editor saved a new avatar since the last build? It runs as its own
++    // process against the same avatar_data_dir, so the file changing underneath
++    // us is the signal. Adopt it into the guest's own buffer -- not just our
++    // cache -- or the dashboard keeps handing back the manifest it read at
++    // startup and the change reverts on the very next render.
++    //
++    // Only for the signed-in user's own build: a gamercard showing a friend must
++    // not pick up this console's avatar, so the owner has to match.
++    if (!random_npc) {
++      std::error_code ec;
++      const auto write_time = std::filesystem::last_write_time(AvatarManifestPath(), ec);
++      const uint64_t stamp =
++          ec ? 0ull : static_cast<uint64_t>(write_time.time_since_epoch().count());
++      if (stamp && stamp != g_manifest_stamp) {
++        REXKRNL_INFO("[avatar] persisted manifest changed (stamp {} -> {})", g_manifest_stamp,
++                     stamp);
++        g_manifest_stamp = stamp;
++        auto saved = ReadPersistedManifest(nullptr);
++        if (saved.size() == sizeof(g_captured_metadata) &&
++            std::memcmp(saved.data(), metadata, saved.size()) != 0) {
++          const auto* fresh =
++              reinterpret_cast<const avatars::X_AVATAR_METADATA*>(saved.data());
++          if (static_cast<uint64_t>(fresh->owner_xuid) ==
++              static_cast<uint64_t>(metadata->owner_xuid)) {
++            std::memcpy(mem->TranslateVirtual<uint8_t*>(meta_addr), saved.data(), saved.size());
++            std::memcpy(g_captured_metadata, saved.data(), saved.size());
++            g_have_metadata = true;
++            g_manifest_adopted = true;
++            REXKRNL_INFO("[avatar] adopting the manifest saved by the editor "
++                         "(owner {:016X}); rebuilding",
++                         static_cast<uint64_t>(fresh->owner_xuid));
++          }
++        }
++      }
++
++      // Keep it applied, for the rest of the session.
++      //
++      // Overwriting the buffer once is not enough. The dashboard keeps its own
++      // master copy of the manifest -- the one it read from profile setting
++      // 0x63E80044 at startup -- and hands GetAssets a fresh scratch copy of it
++      // on every call, at a different address each time. Nothing here can reach
++      // that master copy, and the guest never re-reads the profile, so it hands
++      // back the pre-edit avatar indefinitely:
++      //
++      //     component[2] 00000008-0056-0001  categories=0x8    <- adopted build
++      //     component[2] 00000040-0001-c143  categories=0x40   <- and reverted
++      //
++      // An earlier version stopped substituting once the incoming manifest
++      // matched the adopted one, on the theory that the guest had caught up.
++      // It never catches up: that test passed on the very same call that did
++      // the adopting, because the buffer being compared is the one just
++      // overwritten. So there is no "done" -- once a manifest has been taken
++      // off disk it stays the answer until a newer one replaces it.
++      const auto* adopted =
++          reinterpret_cast<const avatars::X_AVATAR_METADATA*>(g_captured_metadata);
++      if (g_manifest_adopted &&
++          static_cast<uint64_t>(adopted->owner_xuid) ==
++              static_cast<uint64_t>(metadata->owner_xuid) &&
++          std::memcmp(metadata, g_captured_metadata, sizeof(g_captured_metadata)) != 0) {
++        std::memcpy(mem->TranslateVirtual<uint8_t*>(meta_addr), g_captured_metadata,
++                    sizeof(g_captured_metadata));
++        REXKRNL_DEBUG("[avatar] re-applied the adopted manifest over the guest's copy at {:08X}",
++                      meta_addr);
++      }
++    }
++
+     // Distinguish the local player's build from other builds. The player's
+     // manifest is byte-identical to the captured one (the game is fed that
+     // exact buffer via GetManifestLocalUser); synthesized metadata carries
+     // kRandomAvatarXuid instead. Only the player's build refreshes the
+     // manifest capture/cache or receives the custom-avatar substitution.
+-    const bool random_npc =
+-        static_cast<uint64_t>(metadata->owner_xuid) == kRandomAvatarXuid;
+     const bool is_player_build =
+         !random_npc &&
+         (!g_have_metadata ||
+@@ -914,7 +1127,9 @@
+       if (!g_have_metadata) {
+         // Persist it so the next launch has valid metadata before the model
+         // master loads; this launch captures too late for that.
+-        WriteHostFile(AvatarManifestPath(), g_captured_metadata, sizeof(g_captured_metadata));
++        REXKRNL_WARN("[avatar] writing manifest from GetAssets (first capture)");
++        REXKRNL_WARN("[avatar] writing manifest from XamAvatarSetManifest");
++      WriteHostFile(AvatarManifestPath(), g_captured_metadata, sizeof(g_captured_metadata));
+       }
+       g_have_metadata = true;
+       // Push it into the buffer the game last asked GetManifestLocalUser to
+@@ -1095,6 +1310,7 @@
+ u32 XamAvatarGetMetadataRandom_entry(u32 body_type, u32 avatars_count,
+                                      ppc_ptr_t<X_AVATAR_METADATA> avatar_metadata_ptr,
+                                      mapped_void overlapped_ptr) {
++  REXKRNL_INFO("[avatar] GetMetadataRandom(body_type={}, count={})", body_type, avatars_count);
+   static uint32_t call_no = 0;
+   auto run = [&]() -> X_RESULT {
+     if (!avatar_metadata_ptr || !avatars_count) {

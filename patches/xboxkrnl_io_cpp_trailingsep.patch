@@ -1,0 +1,30 @@
+--- src/kernel/xboxkrnl/xboxkrnl_io.cpp.bak-trailingsep	2026-08-30 17:34:52.577617000 -0500
++++ src/kernel/xboxkrnl/xboxkrnl_io.cpp	2026-08-30 17:35:24.466139400 -0500
+@@ -128,6 +128,27 @@
+       target_path, (uint32_t)desired_access, (uint32_t)file_attributes, (uint32_t)share_access,
+       (uint32_t)creation_disposition, (uint32_t)create_options);
+ 
++  // A directory named with a trailing separator is still that directory.
++  //
++  // The VFS resolves the path component by component, so a trailing backslash
++  // leaves an empty final component and the lookup misses -- an open of
++  // "\Device\Harddisk0\Partition1\\" fails with X_STATUS_NO_SUCH_FILE even
++  // though the device is mounted and the identical path without the separator
++  // opens fine. XAM's start-up enumerates storage that way and cannot get past
++  // it.
++  //
++  // Normalising here rather than at the call site is deliberate: this entry
++  // point is also reached from inside the kernel implementations themselves,
++  // not only through the __imp__NtCreateFile export, so a guest-side override
++  // never sees those calls.
++  //
++  // The root itself ("\\") keeps its separator; there is no name left if it is
++  // taken away.
++  // 0x5C is a backslash, written numerically so the literal cannot be mangled.
++  while (target_path.size() > 1 && target_path.back() == 0x5C) {
++    target_path.pop_back();
++  }
++
+   // Enforce that the path is ASCII.
+   if (!IsValidPath(target_path, false)) {
+     return X_STATUS_OBJECT_NAME_INVALID;

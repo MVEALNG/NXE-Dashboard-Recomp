@@ -1,0 +1,61 @@
+--- src/filesystem/virtual_file_system.cpp.bak-mountroot	2026-08-30 17:38:39.641909800 -0500
++++ src/filesystem/virtual_file_system.cpp	2026-08-30 17:51:16.387289600 -0500
+@@ -218,13 +218,44 @@
+   auto base_path = rex::string::utf8_find_base_guest_path(path);
+   if (!base_path.empty()) {
+     parent_entry = !root_entry ? ResolvePath(base_path) : root_entry->ResolvePath(base_path);
+-    if (!parent_entry) {
++    if (parent_entry) {
++      auto file_name = rex::string::utf8_find_name_from_guest_path(path);
++      entry = parent_entry->GetChild(file_name);
++    }
++
++    // A mount point is not a child of its parent path.
++    //
++    // Every path is split into parent + name, so opening a device root asks the
++    // parent for a child of that name -- and a mount is not held as a child of
++    // anything, it is a device in its own right. For
++    // "\Device\Harddisk0\Partition1" the parent "\Device\Harddisk0" resolves
++    // perfectly well and simply has no child called "Partition1", so the open
++    // failed with X_STATUS_NO_SUCH_FILE while the device was mounted and
++    // resolvable on its own. XAM's start-up enumerates storage by opening
++    // exactly that and could not get past it.
++    //
++    // Resolving the whole path catches it. Only reached when the split lookup
++    // found nothing, so an ordinary miss is unaffected, and parent_entry is
++    // dropped because a root has no parent to be validated against.
++    if (!entry) {
++      Entry* whole = !root_entry ? ResolvePath(path) : root_entry->ResolvePath(path);
++      if (whole) {
++        static bool s_said_mount_root = false;
++        if (!s_said_mount_root) {
++          s_said_mount_root = true;
++          REXFS_WARN("VFS: '{}' is a mount root; opened directly rather than as a child", path);
++        }
++        entry = whole;
++        parent_entry = nullptr;
++      }
++    }
++
++    // Unchanged: with no parent and nothing of its own, there is nothing to open
++    // and nothing to create it in either.
++    if (!entry && !parent_entry) {
+       *out_action = FileAction::kDoesNotExist;
+       return X_STATUS_NO_SUCH_FILE;
+     }
+-
+-    auto file_name = rex::string::utf8_find_name_from_guest_path(path);
+-    entry = parent_entry->GetChild(file_name);
+   } else {
+     entry = !root_entry ? ResolvePath(path) : root_entry->GetChild(path);
+   }
+@@ -253,6 +284,9 @@
+     case FileDisposition::kOverwrite:
+       // Must exist.
+       if (!entry) {
++        REXFS_DEBUG("VFS: open refused for '{}' -- base='{}' parent={} entry=null",
++                    path, rex::string::utf8_find_base_guest_path(path),
++                    parent_entry ? "found" : "null");
+         *out_action = FileAction::kDoesNotExist;
+         return X_STATUS_NO_SUCH_FILE;
+       }

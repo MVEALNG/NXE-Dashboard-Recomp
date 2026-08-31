@@ -1,0 +1,21 @@
+--- src/filesystem/entry.cpp.bak-emptycomponent	2026-08-30 17:42:23.766433200 -0500
++++ src/filesystem/entry.cpp	2026-08-30 17:42:23.813942500 -0500
+@@ -65,6 +65,18 @@
+   // Walk the path, one separator at a time.
+   Entry* entry = this;
+   for (auto& part : rex::string::utf8_split_path(path)) {
++    // An empty component names nothing, so it resolves to where it started.
++    //
++    // This is what made a device root impossible to open. The path of a mount
++    // point leaves an empty relative path once the mount prefix is taken off,
++    // the split hands that back as a single empty component, GetChild("")
++    // misses, and the root of the device resolves to nullptr -- so an open of
++    // "\Device\Harddisk0\Partition1" failed with X_STATUS_NO_SUCH_FILE while
++    // the device was plainly mounted. Skipping empty components makes the
++    // no-component case resolve to this entry, which is what it means.
++    if (part.empty()) {
++      continue;
++    }
+     entry = entry->GetChild(part);
+     if (!entry) {
+       // Not found.

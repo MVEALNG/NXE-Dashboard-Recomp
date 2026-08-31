@@ -1,0 +1,51 @@
+# Build output.
+out/
+build/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.map
+*.log
+logs/
+
+# Machine-translated code.
+#
+# generated/ is rexglue's output: several hundred megabytes of C++ produced from
+# the dashboard executable. It is derived from Microsoft's code, so it is not
+# ours to publish, and it is reproducible in one command from a dump anyone
+# supplies themselves. See the README.
+generated/
+generated.*/
+
+# Game data.
+#
+# The staged game directory, the storage tree and the artwork are all either
+# Microsoft's or the property of the publishers whose games they describe.
+# Nothing under them belongs in this repository.
+gamedir/
+storage/
+assets/
+nxe_dash_gamedir/
+Xbox360Storage/
+
+# Local configuration. NXE.toml is rewritten from cvar state on exit, so it
+# tracks one machine's paths and is never worth committing.
+NXE.toml
+*.toml.bak
+*.bak
+*.bak-*
+*.orig
+
+# Editor and OS noise.
+.vs/
+.vscode/
+.idea/
+*.user
+Thumbs.db
+.DS_Store
+
+# Python bytecode and stale manifest snapshots.
+__pycache__/
+*.pyc
+*.pre-xam-*

@@ -1,0 +1,42 @@
+--- src/kernel/xboxkrnl/xboxkrnl_memory.cpp.bak-debugmemory	2026-08-30 17:47:19.550928500 -0500
++++ src/kernel/xboxkrnl/xboxkrnl_memory.cpp	2026-08-30 17:47:19.618766700 -0500
+@@ -203,7 +203,18 @@
+ u32 NtProtectVirtualMemory_entry(mapped_u32 base_addr_ptr, mapped_u32 region_size_ptr,
+                                  u32 protect_bits, mapped_u32 old_protect, u32 debug_memory) {
+   // Set to TRUE when this memory refers to devkit memory area.
+-  assert_true(debug_memory == 0);
++  // Devkit memory is not a separate region here, so the flag is not fatal.
++  //
++  // XAM was built for a devkit and asks for the debug heap; this runtime has one
++  // heap, and NtAllocateVirtualMemory already serves those requests out of it
++  // with only a warning -- its matching assert is commented out just above. The
++  // assert here therefore fired on memory the allocator had happily handed over,
++  // which killed the process (0x80000003 is a breakpoint) rather than reporting
++  // anything. Warn and carry on, consistently with the allocation path.
++  if ((uint32_t)debug_memory != 0) {
++    REXKRNL_WARN("NtProtectVirtualMemory: devkit memory area (debug_memory={})",
++                 (uint32_t)debug_memory);
++  }
+ 
+   // Must request a size.
+   if (!base_addr_ptr || !region_size_ptr || !*region_size_ptr) {
+@@ -261,7 +272,18 @@
+   // _In_     BOOLEAN DebugMemory
+ 
+   // Set to TRUE when freeing external devkit memory.
+-  assert_true(debug_memory == 0);
++  // Devkit memory is not a separate region here, so the flag is not fatal.
++  //
++  // XAM was built for a devkit and asks for the debug heap; this runtime has one
++  // heap, and NtAllocateVirtualMemory already serves those requests out of it
++  // with only a warning -- its matching assert is commented out just above. The
++  // assert here therefore fired on memory the allocator had happily handed over,
++  // which killed the process (0x80000003 is a breakpoint) rather than reporting
++  // anything. Warn and carry on, consistently with the allocation path.
++  if ((uint32_t)debug_memory != 0) {
++    REXKRNL_WARN("NtFreeVirtualMemory: devkit memory area (debug_memory={})",
++                 (uint32_t)debug_memory);
++  }
+ 
+   if (!base_addr_value) {
+     return X_STATUS_MEMORY_NOT_ALLOCATED;
