@@ -95,6 +95,10 @@ NXE.exe --storage_root="D:/Xbox360Storage" --game_art_dir="D:/covers"
 | `avatar_editor_exe` | The avatar editor recompilation, a separate project. |
 | `guide_enable` | Route the Guide into real recompiled XAM. Off: it corrupts the heap during start-up. |
 
+Editing avatars requires the separate Avatar Editor Recomp project. Get it from
+the [Avatar Editor Recomp GitHub repository](https://github.com/panedivitasei/AvatarEditorRecomp),
+build it, and point `avatar_editor_exe` at its executable.
+
 Note that `NXE.toml` is rewritten from cvar state when the dashboard exits, so
 hand-edited entries in it do not survive a run. Use the command line for
 anything you want to stick.
