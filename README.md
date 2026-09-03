@@ -178,8 +178,14 @@ updates:
 	Demos redirects to the Game Library; backing out from there can freeze the
 	application.
 
-## Licence
+## Credits
 
-The code in `src/`, `tools/` and `patches/` is provided under the terms in
-`LICENSE`. It carries no Microsoft code and no game content, and nothing here
-distributes either.
+- [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk)
+- [panedivitasei](https://github.com/panedivitasei)
+- [XenosRecomp](https://github.com/hedge-dev/XenosRecomp)
+
+## License
+
+This project is dedicated to the public domain under the terms of [CC0 1.0
+Universal](LICENSE). It carries no Microsoft code and no game content, and
+nothing here distributes either.
