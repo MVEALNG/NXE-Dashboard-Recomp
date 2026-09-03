@@ -183,8 +183,12 @@ updates:
 ## Credits
 
 - [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk)
-- [panedivitasei](https://github.com/panedivitasei)
+- [panedivitasei](https://github.com/panedivitasei), for creating the Avatar
+  Editor Recomp and filling in the missing avatar assets needed for the
+  dashboard to register avatars correctly
 - [XenosRecomp](https://github.com/hedge-dev/XenosRecomp)
+- NexilTV from Discord, for providing a real Xbox 360 profile that helped fix
+  gamerscore recognition, the gamerscore icon, and recent game activity issues
 
 ## License
 
