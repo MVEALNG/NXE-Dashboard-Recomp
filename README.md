@@ -29,6 +29,8 @@ already have.
 - Windows, CMake 3.25+, Clang (LLVM), Ninja
 - The ReXGlue SDK, built and installed
 - A 9199 `$SystemUpdate` dump
+- The [Avatar Editor Recomp](https://github.com/panedivitasei/AvatarEditorRecomp),
+  required to edit avatars
 
 ### SDK patches
 
