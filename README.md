@@ -116,6 +116,15 @@ The Game Library can contain both Xbox 360 and PC games:
 	detected executable. PC titles launch directly, while Xbox 360 titles use
 	`game_emulator`.
 
+## Keybinds
+
+| Key | Action |
+| --- | --- |
+| `F7` | Opens the setup window. Add directories, import Xenia profiles, and sync a Microsoft account. |
+| `F8` | Opens the Game Library menu. Shows loaded games, profiles, PC games, and Xbox 360 ROMs. |
+| `F4` | Opens the debug menu. |
+| `F9` | Opens achievements. |
+
 ## Data tools
 
 The scripts in `tools/` import local profile data and retrieve optional Xbox
@@ -146,6 +155,16 @@ Partial: the Guide. Pressing Messages opens a real dashboard scene rather than
 XAM's Guide — the authentic blades live in `huduiskin.xex`, which this runtime
 cannot decrypt. Running real XAM gets through start-up but corrupts the
 runtime's heap, so it stays behind `guide_enable`.
+
+## Known issues
+
+The following issues are currently being worked on and will be fixed in future
+updates:
+
+- Exiting the Game Library can freeze the application.
+- The Video Library does not work yet.
+- The Music Library opens, but its functionality is not working yet.
+- The Picture Library opens, but its functionality is not working yet.
 
 ## Licence
 
