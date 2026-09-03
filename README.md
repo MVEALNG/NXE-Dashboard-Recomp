@@ -85,7 +85,7 @@ Anything absolute in a config file or on the command line wins over these, so
 the data can live wherever you like:
 
 ```
-NXE.exe --storage_root="D:/Xbox360Storage" --game_art_dir="D:/covers"
+NXE.exe -storage_root="D:/Xbox360Storage" -game_art_dir="D:/covers"
 ```
 
 ### Optional settings
