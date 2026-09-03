@@ -76,7 +76,7 @@ installation looks like this:
 NXE.exe
 gamedir/        staged game directory: default.xex, the .xzp packages, fonts
 gamedir/sharedres/  loose overrides for shared resources
-storage/        Content/, xconfig.bin -- the console storage tree
+storage/        Content/, xconfig.bin - the console storage tree
 assets/covers/  cover art, named <titleid>.png
 assets/icons/   game icons, named <titleid>.png
 ```
