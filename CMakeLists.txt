@@ -39,8 +39,15 @@ set(NXEDASH_SOURCES
     src/game_launch.cpp
     src/discord_presence.cpp
     src/cover_art.cpp
+    src/pc_library.cpp
     src/played_titles.cpp
     src/content_enum.cpp
+    src/library_refresh.cpp
+    src/disc_dialog.cpp
+    src/first_run.cpp
+    src/setup_tools.cpp
+    src/rom_library.cpp
+    src/setup_check.cpp
     src/content_resolve.cpp
     src/profile_read.cpp
     src/content_metadata.cpp

@@ -87,6 +87,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "blade_nav.h"
+#include "channel_pages.h"
 #include "install_paths.h"
 #include "profile_list.h"
 
@@ -258,6 +260,30 @@ REXCVAR_DEFINE_STRING(guide_look_locator, "file://media:/guide_res/gamercrd.skin
 // that fixed in xex_module.cpp, huduiskin gets a real second attempt.
 REXCVAR_DEFINE_BOOL(guide_recover_packages, true, "Dashboard",
                     "Load huduiskin.xex on first use to recover its version 1 UI packages.");
+
+// Leave XAM's dispatch table where XAM's own code looks for it.
+//
+// Relocating it to 0x60000000 fixed one crash and caused another. XAM's
+// generated REX_LOOKUP_FUNC computes the table address from constants baked in
+// at codegen time -- image_base + image_size, which for this image is
+// 0x81C00000 -- so moving the table at runtime only moves it for us. The moment
+// XAM makes an indirect call it reads the old address and finds nothing:
+//
+//     access  read
+//     fault address  0x0000000181C4C950        (= 0x81C00000 + 0x4C950)
+//
+// which is exactly the limitation the relocation was written with, now reached
+// because start-up gets as far as the storage enumeration and that calls
+// indirectly.
+//
+// Natural placement needs the range to be genuinely free, which is what went
+// wrong the first time: 0x81C00000 sits in the XEX heaps and the dashboard had
+// already been allocating there for a minute by the time the Guide loaded. So
+// this pairs with guide_preload -- claim the range before the dashboard grows
+// into it, rather than after.
+REXCVAR_DEFINE_BOOL(guide_table_natural, false, "Dashboard",
+                    "Leave XAM's dispatch table at its natural address so XAM's own indirect "
+                    "calls resolve. Needs guide_preload to claim the range early.");
 
 REXCVAR_DEFINE_BOOL(guide_dummytable, false, "Dashboard",
                     "Create the second dispatch table over a dummy unused range instead of XAM's.");
@@ -453,6 +479,11 @@ bool RegisterGuideCode(runtime::FunctionDispatcher* dispatcher) {
     image_size = 0x10000;
     REXKRNL_INFO("Guide: using a DUMMY table range {:#010x}+{:#x} instead of XAM's", code_base,
                  code_size);
+  } else if (REXCVAR_GET(guide_table_natural)) {
+    // Exactly what the image says, so image_base + image_size lands the table on
+    // the address XAM's own generated lookup was compiled to read.
+    REXKRNL_INFO("Guide: table left at its natural {:#010x} so XAM's own lookups resolve",
+                 image_base + image_size);
   } else {
     // XAM's real code range, with its dispatch table moved out of the way.
     //
@@ -1260,11 +1291,56 @@ bool XamLoaded() { return static_cast<bool>(g_xam_module); }
 // Forwarded to the runtime first so the pad state is filled exactly as before;
 // this only reads the result. XINPUT_STATE is dwPacketNumber then wButtons, so
 // the buttons are a big-endian u16 at +4.
+// Opening the inbox once the shell will accept a page.
+//
+// XamShowMessagesUI fires while a scene transition is still running -- the gamer
+// blade closing over the profile section -- and 0x922C5580 will not push a page
+// under one: it returns 0x8030000B. The refusal is not clean either. Whatever it
+// leaves behind on the navigator breaks the next BACK, which comes back
+// 0x8030000A instead of 0, and that is what stranded the profile section with no
+// way back to the dashboard -- BACK returns 0 in all 622 other recorded cases,
+// and 0x8030000A appeared only in runs where Messages had been pressed.
+//
+// A fixed delay cannot cover a transition whose length is not known, so the
+// request is held and retried from the input poll -- the one thing that runs
+// every frame -- until the shell takes it. Only "busy" is retried; any other
+// result is final and stops at once.
+constexpr int32_t kSceneBusy = int32_t(0x8030000B);
+constexpr int kOpenMessagesFrames = 120;  // ~2s at 60Hz
+constexpr int kOpenMessagesEvery = 15;    // 8 attempts over that, not 120
+std::atomic<int> g_open_messages_for{0};
+
 REX_HOOK_RAW(__imp__XamInputGetState) {
   const uint32_t state_ptr = ctx.r5.u32;
 
   if (auto* forward = RuntimeFunc("__imp__XamInputGetState")) {
     forward(ctx, base);
+  }
+
+  // The held inbox open; see XamShowMessagesUI.
+  if (const int left = g_open_messages_for.load(std::memory_order_relaxed); left > 0) {
+    bool done = false;
+    // Spaced out on purpose. A refused push is not free -- it is the thing that
+    // breaks BACK -- so this asks a handful of times across the window rather
+    // than once a frame, which would repeat the damage sixty times a second.
+    if (left % kOpenMessagesEvery == 0) {
+      const int32_t hr =
+          nxe_channels::OpenCategoryPageResult(ctx, base, "messages", "Messages");
+      if (hr >= 0) {
+        done = true;
+      } else if (hr != kSceneBusy) {
+        REXKRNL_WARN("XamShowMessagesUI: the inbox could not be opened -> {:#x}",
+                     uint32_t(hr));
+        done = true;
+      }
+    }
+    if (!done && left == 1) {
+      REXKRNL_WARN("XamShowMessagesUI: the shell stayed busy for {} frames; the inbox was "
+                   "not opened",
+                   kOpenMessagesFrames);
+      done = true;
+    }
+    g_open_messages_for.store(done ? 0 : left - 1, std::memory_order_relaxed);
   }
 
   if (!state_ptr || ctx.r3.u32 != 0) {
@@ -1309,6 +1385,11 @@ REX_HOOK_RAW(__imp__XamInputGetState) {
 REX_HOOK_RAW(__imp__XamShowMessagesUI) {
   const uint32_t user_index = ctx.r3.u32;
 
+  // Unconditional, because its absence was itself the confusing part: every
+  // branch below used to be silent on success, so a run where the button did
+  // nothing looked exactly like a run where it was never pressed.
+  REXKRNL_WARN("XamShowMessagesUI(user {}): pressed", user_index);
+
   // Without XAM, draw the Guide ourselves.
   //
   // This is the default path. It touches none of XAM: the dashboard's own XUI
@@ -1316,6 +1397,50 @@ REX_HOOK_RAW(__imp__XamShowMessagesUI) {
   // Guide and nothing runs that can take the process down. guide_enable opts
   // into the real thing instead, which still corrupts the heap during start-up.
   if (!REXCVAR_GET(guide_enable)) {
+    // The inbox, which is what this item is for -- but not from here.
+    //
+    // Messages is case 0 of the gamer blade's dispatcher and lands in this hook.
+    // The Guide blade it used to open cannot be shown, and the messages are read
+    // from xblmessaging by tools/fetch_messages.py and built into a page like any
+    // other category, so that page is what should open.
+    //
+    // Pushing it here does not work: the blade is still up at this moment and the
+    // shell refuses to put a scene under it --
+    //
+    //     opening 'messages:Messages': nav 0x1014d, container 0x4205cc20
+    //     opened  'messages:Messages': push 0x8030000b
+    //
+    // -- and a failed push falls through to the guide-look scenes, which is what
+    // was appearing instead of the inbox. The navigator was never the problem;
+    // the navigator was. The blade navigates with its own, kept at +0x10C of the
+    // blade object, and the dashboard's tiles use a different one; pushing the
+    // inbox onto the dashboard's is what the refusal was about. profile_ui.cpp
+    // found this first for the Profile item, and Messages is the same case of
+    // the same dispatcher, so it is reached the same way.
+    if (nxe_channels::HasCategoryPage("messages", "Messages")) {
+      const uint32_t blade_nav = nxe_blade::Navigator(base);
+      if (blade_nav) {
+        const int32_t hr =
+            nxe_channels::OpenCategoryPageOn(ctx, base, blade_nav, "messages", "Messages");
+        REXKRNL_WARN("XamShowMessagesUI(user {}): inbox on the blade navigator {:#x} -> {:#x}",
+                     user_index, blade_nav, uint32_t(hr));
+        if (hr >= 0) {
+          ctx.r3.u64 = X_ERROR_SUCCESS;
+          return;
+        }
+      } else {
+        REXKRNL_WARN("XamShowMessagesUI(user {}): no blade dispatch on this thread; "
+                     "falling back to the held open",
+                     user_index);
+      }
+      // No blade navigator, or it would not take the page: fall back to asking
+      // again from the input poll over the next couple of seconds.
+      g_open_messages_for.store(kOpenMessagesFrames, std::memory_order_relaxed);
+      ctx.r3.u64 = X_ERROR_SUCCESS;
+      return;
+    }
+    REXKRNL_WARN("XamShowMessagesUI(user {}): no inbox page was built; nothing to show",
+                 user_index);
     if (ShowGuideLook(ctx, base)) {
       ctx.r3.u64 = X_ERROR_SUCCESS;
       return;

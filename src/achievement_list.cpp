@@ -24,12 +24,17 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include <rex/hook.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
+
+#include "install_paths.h"
 #include <rex/system/kernel_state.h>
 #include <rex/system/xenumerator.h>
 #include <rex/system/xobject.h>
@@ -60,6 +65,19 @@ struct X_ACHIEVEMENT_DETAILS {
 };
 #pragma pack(pop)
 static_assert(sizeof(X_ACHIEVEMENT_DETAILS) == 36, "achievement record is 36 bytes");
+
+// Achievements for titles with no GPD of their own.
+//
+// A per-title GPD exists only for a game this console has played. The titles
+// merged into the library out of the account's LIVE history have none, and
+// without this they arrive with a count in the list and an empty page behind
+// it -- which is worse than not listing them, because the number promises
+// something the page then fails to show.
+REXCVAR_DEFINE_STRING(achievement_data, "gamedir/achdata.txt", "Dashboard",
+                      "Pipe-delimited achievements for titles with no GPD: "
+                      "titleid|id|gamerscore|flags|imageid|name|description|locked, "
+                      "one per line, # for comments. Empty disables the fallback. "
+                      "tools/fetch_achievements.py writes it.");
 
 constexpr size_t kStringBufferSize = 464;
 constexpr uint16_t kNamespaceAchievement = 1;
@@ -102,11 +120,74 @@ std::u16string ReadString(const uint8_t* data, size_t size, size_t& offset) {
 //   0x04 achievement id       0x10 flags
 //   0x08 image id             0x14 unlock time (FILETIME)
 //   0x1C label, description and locked description, UTF-16BE, NUL separated
+// The same records, out of a text file instead of an XDBF one.
+//
+// flags is copied through rather than rebuilt: the service states it, and it is
+// the field the console reads to decide whether an achievement is earned, shown
+// online, or secret. Halo 3's "Landfall" arrives as 0x12000E and means exactly
+// what it would have meant in the GPD.
+std::vector<Achievement> ParseAchievementsFromFile(uint32_t title_id) {
+  std::vector<Achievement> found;
+  const std::string setting = REXCVAR_GET(achievement_data);
+  if (setting.empty()) {
+    return found;
+  }
+  std::ifstream file(nxe_paths::Resolve(setting));
+  if (!file) {
+    return found;
+  }
+
+  char wanted[9] = {};
+  std::snprintf(wanted, sizeof(wanted), "%08X", title_id);
+
+  std::string line;
+  while (std::getline(file, line)) {
+    while (!line.empty() && (line.back() == 13 || line.back() == 10)) line.pop_back();
+    if (line.empty() || line[0] == 35) continue;  // 35 == '#'
+    if (line.compare(0, 8, wanted) != 0 || line.size() < 9 || line[8] != 124) {
+      continue;  // 124 == '|'; a cheap prefix test before splitting
+    }
+
+    std::string field[8];
+    size_t at = 0;
+    for (int i = 0; i < 8 && at <= line.size(); ++i) {
+      const size_t bar = line.find(124, at);
+      field[i] = line.substr(at, bar == std::string::npos ? std::string::npos : bar - at);
+      if (bar == std::string::npos) break;
+      at = bar + 1;
+    }
+
+    Achievement a;
+    a.id = uint32_t(std::strtoul(field[1].c_str(), nullptr, 10));
+    a.gamerscore = uint32_t(std::strtoul(field[2].c_str(), nullptr, 10));
+    a.flags = uint32_t(std::strtoul(field[3].c_str(), nullptr, 10));
+    a.image_id = uint32_t(std::strtoul(field[4].c_str(), nullptr, 10));
+    a.unlock_time = 0;  // the service reports 1753 for these, which is "unknown"
+    // UTF-8 on disk, UTF-16 in the record. Anything outside ASCII becomes a
+    // question mark rather than half a codepoint, which would draw as a box.
+    auto widen = [](const std::string& text) {
+      std::u16string out;
+      out.reserve(text.size());
+      for (unsigned char ch : text) out.push_back(ch < 0x80 ? char16_t(ch) : char16_t(63));
+      return out;
+    };
+    a.label = widen(field[5]);
+    a.description = widen(field[6]);
+    a.unachieved = widen(field[7].empty() ? field[6] : field[7]);
+    found.push_back(std::move(a));
+    if (found.size() >= kMaxAchievements) break;
+  }
+
+  std::sort(found.begin(), found.end(),
+            [](const Achievement& a, const Achievement& b) { return a.id < b.id; });
+  return found;
+}
+
 std::vector<Achievement> ParseAchievements(uint32_t title_id) {
   std::vector<Achievement> found;
   const auto data = nxe_profile::ReadTitleGpd(title_id);
   if (data.size() < 24 || std::memcmp(data.data(), "XDBF", 4) != 0) {
-    return found;
+    return ParseAchievementsFromFile(title_id);
   }
 
   const uint32_t entry_capacity = Be32(&data[8]);
@@ -137,6 +218,11 @@ std::vector<Achievement> ParseAchievements(uint32_t title_id) {
     a.description = ReadString(r, rec_len, s);
     a.unachieved = ReadString(r, rec_len, s);
     found.push_back(std::move(a));
+  }
+
+  if (found.empty()) {
+    // A GPD that exists but records nothing is the same problem as no GPD.
+    return ParseAchievementsFromFile(title_id);
   }
 
   std::sort(found.begin(), found.end(),

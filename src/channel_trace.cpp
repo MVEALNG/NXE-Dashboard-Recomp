@@ -88,8 +88,17 @@ void DumpChannels(uint8_t* base, uint32_t container) {
   while (node && node != head && i < 40) {
     // Nodes are linked through the channel's +4; the channel starts one word back.
     const uint32_t channel = node - 4;
-    REXKRNL_WARN("[channel]   [{}] id='{}' defpath='{}'", i, ChannelId(base, channel),
-                 WideAt(base, Be32(base, channel + 32)));
+    // Enough of the channel to tell a drawable one from a merely present one:
+    // +16 is the "definition complete" flag the channeldef handler sets, +28 the
+    // description the tab is labelled with, +56 the slot count, +88 the epixapp
+    // enable, +92 pass1slots and +96 the local-content flag.
+    REXKRNL_WARN(
+        "[channel]   [{}] id='{}' defpath='{}' defined={} desc='{}' slots={} spacing={} cond={:#x} "
+        "epixapp={} pass1={} local={}",
+        i, ChannelId(base, channel), WideAt(base, Be32(base, channel + 32)),
+        Be32(base, channel + 16), WideAt(base, Be32(base, channel + 28)),
+        Be32(base, channel + 56), Be32(base, channel + 80), Be32(base, channel + 72),
+        Be32(base, channel + 88), Be32(base, channel + 92), Be32(base, channel + 96));
     node = Be32(base, node);
     ++i;
   }
@@ -98,11 +107,48 @@ void DumpChannels(uint8_t* base, uint32_t container) {
 
 }  // namespace
 
+// Keep the Community channel the manifest defines but the parse throws away.
+//
+// emb_homepage.xml ends with
+//
+//     <channel>
+//         <id>COMMUNITY</id>
+//         <definitionpath>epix://communitychannel.xml</definitionpath>
+//     </channel>
+//
+// and communitychannel.xml is in homepage.xzp beside welcome.xml and
+// xbox360channel.xml -- a Friends channel with a static Add Friend tile and the
+// rest filled in by livepack.xex through <epixapp>. It is the one channel the
+// dash has data for and does not show: eight are created and this is the one
+// 0x922DBB88 discards at </channel>, and not for a parse error, since the
+// channeldef handler never reaches its state 7.
+//
+// 0x922CF148 only unlinks the channel and frees it, so declining to call it
+// leaves the channel alive and linked exactly as it was. The caller clears its
+// own "current channel" afterwards and carries on either way.
+REXCVAR_DEFINE_BOOL(channel_keep_community, false, "Dashboard",
+                    "Keep the COMMUNITY channel that the manifest defines and the parse otherwise "
+                    "discards.");
+
 extern "C" void sub_922CF148(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t container = ctx.r3.u32;
+  // The remover takes the channel in r4 as well, so the one being discarded can
+  // be named while it is still linked -- read before the call, because after it
+  // the object is freed.
+  const uint32_t channel = ctx.r4.u32;
+  const std::string id = channel ? ChannelId(base, channel) : std::string("(none)");
+  const std::string defpath = channel ? WideAt(base, Be32(base, channel + 32)) : std::string();
+
+  if (channel && id == "COMMUNITY" && REXCVAR_GET(channel_keep_community)) {
+    REXKRNL_WARN("[channel] KEPT '{}' (defpath '{}'); the removal was skipped", id, defpath);
+    if (container) DumpChannels(base, container);
+    return;
+  }
+
   __imp__sub_922CF148(ctx, base);
   if (container) {
-    REXKRNL_WARN("[channel] REMOVED, channel count now {}", Be32(base, container + 80));
+    REXKRNL_WARN("[channel] REMOVED '{}' (defpath '{}'), channel count now {}", id, defpath,
+                 Be32(base, container + 80));
     DumpChannels(base, container);
   }
 }

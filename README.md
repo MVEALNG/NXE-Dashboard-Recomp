@@ -95,6 +95,43 @@ Note that `NXE.toml` is rewritten from cvar state when the dashboard exits, so
 hand-edited entries in it do not survive a run. Use the command line for
 anything you want to stick.
 
+## First-run setup
+
+On a new install the dashboard reports missing paths instead of failing
+silently. The setup dialog can be opened during first run, and can be opened
+again with `F7` when paths or tools need to be changed. It covers the profile,
+themes, avatar data, staged games, artwork, and optional launch helpers.
+
+The Game Library can contain both Xbox 360 and PC games:
+
+- Put Xbox 360 game folders containing `default.xex` under `roms_dir`, then
+	refresh the library. The title ID is read from the XEX execution metadata;
+	the game is staged without copying its files.
+- Point `full_games_dir` at a folder of PC game directories or a Steam library.
+	Steam manifests are read for names and app IDs; ordinary folders use a
+	detected executable. PC titles launch directly, while Xbox 360 titles use
+	`game_emulator`.
+
+## Data tools
+
+The scripts in `tools/` import local profile data and retrieve optional Xbox
+Live, marketplace, achievement, social, cover, and video data. The combined
+workflow is:
+
+```
+python tools/xbl_auth.py
+python tools/sync_all.py
+python tools/import_profile.py
+python tools/import_gamerpics.py
+python tools/import_genre_cards.py
+```
+
+Run individual `fetch_*.py` scripts when only one data set is needed. The Xbox
+Live token is cached in `tools/.xbl_token.json`; the video importer can use a
+TMDB key in `tools/.tmdb_key`. Both files are ignored by Git and must never be
+committed. Review each script's `--help` output for source and destination
+overrides before importing data.
+
 ## State of things
 
 Working: boot, themes, profile and gamercard, the game library with real sizes

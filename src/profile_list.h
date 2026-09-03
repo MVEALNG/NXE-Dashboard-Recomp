@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -35,9 +36,35 @@ uint64_t OnlineXuidOf(const std::filesystem::path& profile_dir);
 // The profile's XAMACCOUNTINFO as stored (380 bytes), or empty.
 std::vector<uint8_t> AccountInfoOf(const std::filesystem::path& profile_dir);
 
+// The XUID the guest is told the signed-in profile has.
+//
+// Not UserProfile::xuid(), which is a hardcoded placeholder matching nothing on
+// disk. Everything that hands the guest an identity has to use this one: the
+// moment two of them disagree, anything resolving one against the other decides
+// it is looking at a stranger.
+uint64_t ActiveXuid();
+
 // The profile currently signed in.
 const std::filesystem::path& ProfileDirectory();
 const std::string& GamerTag();
+
+// Throw away everything read off disk for this profile.
+//
+// Bumps the generation, which is all it takes: everything profile-scoped
+// rebuilds on its next use. Signing in does the same thing for the same
+// reason, and so does refreshing the Game Library after installing a game --
+// the question is identical, which is what is on this disk for this person.
+void InvalidateCaches();
+
+// Recompute the settings derived from what is on disk and publish them.
+//
+// The played-title count is the one that matters: the dashboard sizes the Game
+// Library from it and then fills the list from the enumerator, so the two have
+// to describe the same disk. They are read at different moments -- the count
+// once when the profile loads, the list whenever the screen opens -- so a game
+// installed in between leaves them disagreeing, which is the state that makes
+// the library discard its own contents.
+void RepublishDerivedSettings();
 
 // Bumped whenever the signed-in profile changes. Everything derived from a
 // profile is cached against this, so one increment invalidates all of it at

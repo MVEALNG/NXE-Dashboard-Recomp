@@ -49,3 +49,9 @@ Thumbs.db
 __pycache__/
 *.pyc
 *.pre-xam-*
+
+# Xbox LIVE refresh token cached by tools/fetch_friends.py -- a credential.
+tools/.xbl_token.json
+
+# TMDB API key for tools/fetch_video.py -- a credential, keep it out of the repo
+tools/.tmdb_key

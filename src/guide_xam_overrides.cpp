@@ -320,7 +320,6 @@ extern "C" void __imp__sub_816FF008(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_81699DF0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_816BA650(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_816C9EA0(PPCContext& __restrict ctx, uint8_t* base);
-extern "C" void __imp__sub_816A17B8(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_816A95A0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_8167ED90(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_816C0698(PPCContext& __restrict ctx, uint8_t* base);
@@ -435,11 +434,135 @@ extern "C" void __imp__sub_816D1AB0(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_8167E918(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_816B7B80(PPCContext& __restrict ctx, uint8_t* base);
 
-extern "C" void sub_81722A30(PPCContext& __restrict ctx, uint8_t* base) {
-  REXKRNL_INFO("Guide: hang >> sub_81722A30");
-  __imp__sub_81722A30(ctx, base);
-  REXKRNL_INFO("Guide: hang << sub_81722A30 done");
+// The per-call tracing that used to be here is gone.
+//
+// Four rounds of it narrowed a "hang" from sub_8167E918 down through
+// sub_8167E5B8, sub_8167E400 and sub_8167DED0, and none of that was real: every
+// run died 7-8 seconds after boot whichever function happened to be executing,
+// so the last one logged was simply the one running when the process was killed.
+// Comparing run durations rather than stop points is what showed it, and
+// crash_report.txt had the answer all along -- a checked-iterator assert on the
+// runtime's BinarySymbol vector, and an access violation in dashboard code
+// reading a pointer past the guest arena, both on dashboard threads with no XAM
+// anywhere in them.
+//
+// It also cost something: logging on every call put 5,000 lines into a 7 second
+// run and slowed XAM's start-up enough to become its own confound.
+
+// sub_81722A30 is memset, and is left alone.
+//
+// It was the last line in the log for a while, which read as the hang. It is
+// not: instrumented with its arguments it returns every time, and the arguments
+// say what it is -- (0x81a9cb30, 0, 0xc80) over a block of zeros, then a stack
+// buffer of 0xbe fill with size 0x210, returning its first argument. That plus a
+// body of nothing but bdnz loops and no calls at all is memset. It was simply
+// the last thing to log before the thread stopped inside its caller.
+
+// Inside sub_8167E918, which is where start-up actually stops.
+//
+// It enters, its VFS open of the mount root now succeeds, memset returns, and
+// then the thread is gone -- with no fault logged, which a bad pointer would
+// have produced. It takes RtlEnterCriticalSection and KeEnterCriticalRegion,
+// so a lock that is never released is the better hypothesis: this XAM shares an
+// address space with a runtime that implements XAM natively, and both have their
+// own idea of who holds what.
+//
+// These are its four XAM callees, so the stop can be narrowed one level further.
+
+extern "C" void __imp__sub_8167E760(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_8172DF20(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_8167E5B8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void __imp__sub_8167A730(PPCContext& __restrict ctx, uint8_t* base);
+
+extern "C" void sub_8167E760(PPCContext& __restrict ctx, uint8_t* base) {
+  REXKRNL_INFO("Guide: enum >> sub_8167E760 r3={:#010x} r4={:#010x}", ctx.r3.u32, ctx.r4.u32);
+  __imp__sub_8167E760(ctx, base);
+  REXKRNL_INFO("Guide: enum << sub_8167E760 done -> {:#x}", ctx.r3.u32);
 }
+extern "C" void sub_8172DF20(PPCContext& __restrict ctx, uint8_t* base) {
+  REXKRNL_INFO("Guide: enum >> sub_8172DF20 r3={:#010x} r4={:#010x}", ctx.r3.u32, ctx.r4.u32);
+  __imp__sub_8172DF20(ctx, base);
+  REXKRNL_INFO("Guide: enum << sub_8172DF20 done -> {:#x}", ctx.r3.u32);
+}
+extern "C" void sub_8167E5B8(PPCContext& __restrict ctx, uint8_t* base) {
+  REXKRNL_INFO("Guide: enum >> sub_8167E5B8 r3={:#010x} r4={:#010x}", ctx.r3.u32, ctx.r4.u32);
+  __imp__sub_8167E5B8(ctx, base);
+  REXKRNL_INFO("Guide: enum << sub_8167E5B8 done -> {:#x}", ctx.r3.u32);
+}
+extern "C" void sub_8167A730(PPCContext& __restrict ctx, uint8_t* base) {
+  REXKRNL_INFO("Guide: enum >> sub_8167A730 r3={:#010x} r4={:#010x}", ctx.r3.u32, ctx.r4.u32);
+  __imp__sub_8167A730(ctx, base);
+  REXKRNL_INFO("Guide: enum << sub_8167A730 done -> {:#x}", ctx.r3.u32);
+}
+
+
+
+// XAM's process heap has no memory, so its allocations are served here.
+//
+// Every allocation XAM makes out of heap 0 fails, including 64 byte ones, which
+// is not memory pressure -- it is a heap that was never given anything to hand
+// out:
+//
+//     heap pick(0x0) -> 0x81aabff8
+//     heap alloc(heap=0x81aabff8 flags=0x19000fee size=6536) -> 0x8007000e
+//     heap alloc(heap=0x81aabff8 flags=0x190005ee size=64)   -> 0x8007000e
+//
+// sub_816E6618 builds heaps 1 through 8 with explicit sizes and never calls
+// sub_816E6518 for heap 0 at all -- it only writes the 0xCCCC marker into its
+// descriptor. GetProcessHeap points at that same descriptor, so heap 0 is the
+// process heap, and on a console the loader is what backs it.
+//
+// The consequence is everything still broken after start-up: sub_816A17B8
+// cannot allocate XamLoader's 6,536 byte state, so dword_81A9F850 stays null, so
+// sub_8169D060 -- which is just "return *(dword_81A9F850 + 628) != 0" -- faults
+// reading 0x274. The 0xbebebebe values are memory nothing ever filled.
+//
+// This is the same trade sub_816E67E8 above already makes, one layer down: the
+// real allocator is a pure XAM-internal heap over structures only its start-up
+// fills in, so nothing can be handed to it from outside. XAM's own allocator is
+// tried first and only a refusal is served from the runtime's system heap, so
+// heaps 1 to 8 -- which do work -- are left alone.
+//
+//     r3 = heap   r4 = flags   r5 = size   r6 = where to store the pointer
+//
+// Deliberately never freed, for the reason given above sub_816E67E8: XAM's free
+// path walks the same uninitialised structures.
+extern "C" void __imp__sub_816E5D58(PPCContext& __restrict ctx, uint8_t* base);
+
+extern "C" void sub_816E5D58(PPCContext& __restrict ctx, uint8_t* base) {
+  const uint32_t heap = ctx.r3.u32;
+  const uint32_t flags = ctx.r4.u32;
+  const uint32_t size = ctx.r5.u32;
+  const uint32_t out = ctx.r6.u32;
+
+  __imp__sub_816E5D58(ctx, base);
+  if (static_cast<int32_t>(ctx.r3.u32) >= 0) {
+    return;  // XAM's own heap served it
+  }
+
+  auto* memory = REX_KERNEL_STATE() ? REX_KERNEL_STATE()->memory() : nullptr;
+  const uint32_t address = (memory && size) ? memory->SystemHeapAlloc(size) : 0;
+
+  static uint32_t s_logged = 0;
+  if (++s_logged <= 12) {
+    REXKRNL_WARN("Guide: heap {:#010x} refused {} byte(s) (flags {:#010x}); served {:#010x} "
+                 "from the system heap instead",
+                 heap, size, flags, address);
+  }
+
+  if (!address || !out) {
+    ctx.r3.u64 = 0x8007000E;  // E_OUTOFMEMORY, which is what it already said
+    return;
+  }
+
+  uint8_t* slot = base + out;
+  slot[0] = static_cast<uint8_t>(address >> 24);
+  slot[1] = static_cast<uint8_t>(address >> 16);
+  slot[2] = static_cast<uint8_t>(address >> 8);
+  slot[3] = static_cast<uint8_t>(address);
+  ctx.r3.u64 = 0;
+}
+
 extern "C" void sub_816BA440(PPCContext& __restrict ctx, uint8_t* base) {
   REXKRNL_INFO("Guide: hang >> sub_816BA440");
   __imp__sub_816BA440(ctx, base);
@@ -575,6 +698,81 @@ extern "C" void sub_8172DE40(PPCContext& __restrict ctx, uint8_t* base) {
 // NtCreateFile(handle_out, desired_access, object_attrs, ...) -- r5 is
 // object_attrs, whose name_ptr at +4 is an X_ANSI_STRING {length,
 // maximum_length, pointer}.
+// What XAM asks the storage devices, and whether it is answered.
+//
+// The stop is inside sub_8167DED0, which is the device query at the bottom of
+// the enumeration: it opens a device, issues NtDeviceIoControlFile four times,
+// and closes it. Nothing below it is XAM's own code, so if the thread does not
+// come back out, either the runtime's implementation of this never returns or it
+// returns something XAM will not accept and spins on.
+//
+// NtDeviceIoControlFile(handle, event, apc, apc_ctx, io_status, ioctl, in, in_len, ...)
+// so r3 is the handle and r8 the control code -- the one value that says what is
+// actually being asked for. Logged either side of the forward, so an entry with
+// no matching exit names the call that hangs.
+//
+// This only reports; behaviour is unchanged.
+extern "C" void __imp__NtDeviceIoControlFile(PPCContext& __restrict ctx, uint8_t* base) {
+  using GuestFunc = void (*)(PPCContext&, uint8_t*);
+  static GuestFunc forward = [] () -> GuestFunc {
+    HMODULE m = GetModuleHandleA("rexruntimed.dll");
+    if (m == nullptr) m = GetModuleHandleA("rexruntime.dll");
+    return m ? reinterpret_cast<GuestFunc>(
+                   reinterpret_cast<void*>(GetProcAddress(m, "__imp__NtDeviceIoControlFile")))
+             : nullptr;
+  }();
+
+  const uint32_t handle = ctx.r3.u32;
+  const uint32_t ioctl = ctx.r8.u32;
+  REXKRNL_WARN("Guide: NtDeviceIoControlFile >> handle={:#x} ioctl={:#010x} in={:#x} len={}",
+               handle, ioctl, ctx.r9.u32, ctx.r10.u32);
+
+  // 0x0004D028 is answered here rather than forwarded.
+  //
+  // XAM's storage enumeration opens a device and issues this, and the call never
+  // comes back: the log shows the entry with no matching exit and the process
+  // ends on a 0x80000003, which is what an assert compiles to. The runtime
+  // asserts on control codes it does not implement, so forwarding an IOCTL it
+  // has never seen ends the process rather than returning an error.
+  //
+  // Decoded it is device type 4, function 0x40A, METHOD_BUFFERED, read/write --
+  // a storage device query. There is no such device here, and "this device does
+  // not do that" is both the truthful answer and the one an enumeration is built
+  // to cope with: it skips the device and carries on. Answering it costs nothing
+  // if it turns out XAM wanted something real, because the alternative is not
+  // getting an answer at all.
+  //
+  // The status goes in the IO_STATUS_BLOCK as well as r3. XAM reads the block on
+  // a synchronous call, and leaving whatever was on the stack there would be
+  // worse than the failure itself.
+  if (ioctl == 0x0004D028) {
+    const uint32_t io_status = ctx.r7.u32;
+    if (io_status) {
+      *reinterpret_cast<rex::be<uint32_t>*>(base + io_status) = 0xC0000010;      // Status
+      *reinterpret_cast<rex::be<uint32_t>*>(base + io_status + 4) = 0;           // Information
+    }
+    static int s_said = 0;
+    if (s_said < 4) {
+      ++s_said;
+      REXKRNL_WARN("Guide: NtDeviceIoControlFile ioctl={:#010x} answered here as "
+                   "STATUS_INVALID_DEVICE_REQUEST rather than forwarded", ioctl);
+    }
+    ctx.r3.u64 = 0xC0000010;  // STATUS_INVALID_DEVICE_REQUEST
+    return;
+  }
+
+  if (forward == nullptr) {
+    // Not implemented by the runtime at all. Say so rather than returning a
+    // success XAM would then read an unfilled buffer from.
+    REXKRNL_WARN("Guide: NtDeviceIoControlFile has no runtime implementation to forward to");
+    ctx.r3.u64 = 0xC0000002;  // STATUS_NOT_IMPLEMENTED
+    return;
+  }
+
+  forward(ctx, base);
+  REXKRNL_WARN("Guide: NtDeviceIoControlFile << ioctl={:#010x} -> {:#010x}", ioctl, ctx.r3.u32);
+}
+
 extern "C" void __imp__NtCreateFile(PPCContext& __restrict ctx, uint8_t* base) {
   using GuestFunc = void (*)(PPCContext&, uint8_t*);
   static GuestFunc forward = [] () -> GuestFunc {
@@ -608,7 +806,7 @@ extern "C" void __imp__NtCreateFile(PPCContext& __restrict ctx, uint8_t* base) {
       // and the test is wrong -- and no way to tell them apart. length may or
       // may not count a NUL, so the last byte is reported raw.
       static int s_seen = 0;
-      if (s_seen < 12 && text) {
+      if (s_seen < 400 && text) {
         ++s_seen;
         REXKRNL_WARN("Guide: NtCreateFile sees '{}' (len={}, last byte {:#04x})",
                      std::string(reinterpret_cast<const char*>(base + text), len), len,

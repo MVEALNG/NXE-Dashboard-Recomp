@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <set>
 #include <string>
@@ -46,6 +47,7 @@
 
 #include "discord_presence.h"
 #include "game_launch.h"
+#include "pc_library.h"
 #include "installed_titles.h"
 #include "storage_device.h"
 #include "title_names.h"
@@ -135,6 +137,35 @@ std::filesystem::path ExecutableIn(const std::filesystem::path& dir) {
   std::error_code ec;
   if (std::filesystem::is_regular_file(dir, ec)) {
     return dir;
+  }
+
+  // A game staged from the ROMs folder is not here; it says where it is.
+  //
+  // rom_library.cpp stages one as a package holding a single line of text --
+  // the folder the game really lives in -- rather than copying gigabytes into
+  // the content tree or asking for the privileges a symlink wants. The
+  // emulator needs the whole folder, not just the executable, so what comes
+  // back is resolved the same way any other directory is.
+  {
+    const auto pointer = dir / "rom.txt";
+    if (std::filesystem::exists(pointer, ec)) {
+      std::ifstream file(pointer);
+      std::string line;
+      if (std::getline(file, line) && !line.empty()) {
+        const std::filesystem::path target(line);
+        if (std::filesystem::is_regular_file(target, ec)) {
+          return target;
+        }
+        for (const char* name : {"default.xex", "Default.xex"}) {
+          const auto candidate = target / name;
+          if (std::filesystem::exists(candidate, ec)) {
+            return candidate;
+          }
+        }
+      }
+      REXKRNL_WARN("Game launch: '{}' points at a game that is not there",
+                   pointer.string());
+    }
   }
   for (const char* name : {"default.xex", "Default.xex"}) {
     const auto candidate = dir / name;
@@ -470,8 +501,26 @@ HWND WaitForFullscreen(HWND cover, DWORD pid, HANDLE process) {
 // on_return runs after the dashboard window is back but before the cover comes
 // down, so anything that has to happen before the screen is shown again is
 // still hidden while it happens.
+// Start whatever is staged for a title, by whatever it is.
+//
+// A PC game runs its own program; an Xbox 360 game goes to the emulator. The
+// package says which -- pcgame.txt or rom.txt -- so the caller does not have to
+// know, and every launch site gets the same answer.
 bool RunEmulator(const std::filesystem::path& image,
-                 const std::function<void()>& on_return = {}, uint32_t title_id = 0) {
+                 const std::function<void()>& on_return = {}, uint32_t title_id = 0);
+
+bool LaunchStaged(const std::filesystem::path& staged,
+                  const std::function<void()>& on_return = {}, uint32_t title_id = 0) {
+  if (nxe_pc::LaunchFromPackage(staged)) {
+    // Started, and nothing else to do: it is an ordinary program in its own
+    // window, not a game the dashboard has to hide itself behind.
+    return true;
+  }
+  return RunEmulator(ExecutableIn(staged), on_return, title_id);
+}
+
+bool RunEmulator(const std::filesystem::path& image,
+                 const std::function<void()>& on_return, uint32_t title_id) {
   const std::string emulator = REXCVAR_GET(game_emulator);
   std::error_code ec;
   if (emulator.empty() || !std::filesystem::exists(emulator, ec)) {
@@ -713,7 +762,25 @@ bool LaunchDiscTitle(PPCContext& ctx, uint8_t* base) {
     return false;
   }
   REXKRNL_INFO("Disc launch: title {:#010x} from '{}'", title, image.string());
-  RunEmulator(image, [&] { RestoreDashboardUi(ctx, base); }, title);
+  LaunchStaged(staged, [&] { RestoreDashboardUi(ctx, base); }, title);
+  return true;
+}
+
+bool LaunchStagedTitle(PPCContext& ctx, uint8_t* base, uint32_t title_id) {
+  const auto staged = PackagePathForTitle(title_id);
+  if (staged.empty()) {
+    REXKRNL_INFO("Game launch: title {:#010x} is not staged", title_id);
+    return false;
+  }
+  const auto image = ExecutableIn(staged);
+  std::error_code ec;
+  if (!std::filesystem::exists(image, ec)) {
+    REXKRNL_WARN("Game launch: title {:#010x} staged at '{}' has no executable", title_id,
+                 staged.string());
+    return false;
+  }
+  REXKRNL_INFO("Game launch: title {:#010x} from '{}'", title_id, image.string());
+  LaunchStaged(staged, [&] { RestoreDashboardUi(ctx, base); }, title_id);
   return true;
 }
 
@@ -806,7 +873,7 @@ extern "C" void sub_92278F80(PPCContext& __restrict ctx, uint8_t* base) {
   }
 
   REXKRNL_INFO("Play Game: launching title {:#010x} from '{}'", title, image.string());
-  RunEmulator(image, {}, title);
+  LaunchStaged(staged, {}, title);
   ctx.r3.u64 = 0;
 }
 

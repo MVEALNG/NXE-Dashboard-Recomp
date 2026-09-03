@@ -27,11 +27,13 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <vector>
 
 #include <rex/hook.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/string.h>
 #include <rex/system/kernel_state.h>
@@ -47,12 +49,52 @@
 #include <string>
 
 #include "installed_titles.h"
+#include "played_titles.h"
 #include "storage_device.h"
 
 using namespace rex;
 using namespace rex::system;
 using namespace rex::system::xam;
 
+// Show only games staged from the ROMs folder in the Game Library.
+//
+// Without this the library is every content package ever staged, which on a
+// machine that has been experimented with means games nobody put there. The
+// ROMs folder is a folder somebody manages: adding a game adds it, deleting one
+// removes it, and the shelf matches what is on disk.
+//
+// Only game packages are filtered. Themes, gamerpics and saves are content too,
+// and hiding those would break parts of the dashboard that have nothing to do
+// with which games are installed.
+REXCVAR_DEFINE_BOOL(library_roms_only, true, "Dashboard",
+                    "Show only games staged from roms_dir in the Game Library. Off lists "
+                    "every game package staged under the storage root.");
+
+// List the account's games in All Games even with no package staged for them.
+//
+// Off, because the guest does not survive it. The entries reach the list --
+// the enumeration goes from 881 items to 927 -- and the library then opens the
+// package behind each one to read its header. There is no package, the open
+// returns nothing, and the guest dereferences it without checking: a read of
+// guest address 0 inside sub_92147C78, straight after the enumeration.
+//
+// Listing a title this way therefore needs a package actually staged for it,
+// not merely an entry describing one. Kept as a setting because the entries
+// themselves are right, and become useful the moment there is something behind
+// them to open.
+REXCVAR_DEFINE_BOOL(library_synthesize_content, false, "Dashboard",
+                    "Show games from the profile history in the Game Library even when no "
+                    "package is staged for them. They have no package behind them, so "
+                    "anything that opens one will fail.");
+
+// Content type 0x4000 -- the directory name both installed games use here:
+//
+//     Content/0000000000000000/4D5307E6/00004000/Halo 3
+//
+// so a synthesised entry claims the same type as a real one, and the guest's
+// grouping treats it identically.
+constexpr uint32_t kInstalledGameType = 0x4000;
+constexpr uint32_t kHardDriveDeviceId = 1;
 namespace {
 
 // The dashboard asks for content_type 0xFFFFFFFF, meaning "any type". The
@@ -182,6 +224,33 @@ std::vector<XCONTENT_AGGREGATE_DATA> ListContentAnyType(uint64_t xuid, uint32_t 
   return all;
 }
 
+// Is this a game package that did not come from the ROMs folder?
+//
+// rom.txt is the marker rom_library.cpp leaves in everything it stages, so its
+// absence in a game package means the game was put there some other way.
+bool SkipAsNotARom(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+  if (!REXCVAR_GET(library_roms_only)) {
+    return false;
+  }
+  if (static_cast<uint32_t>(XContentType(data.content_type)) != kInstalledGameType) {
+    return false;  // themes, saves, gamerpics: none of this applies
+  }
+
+  char xuid_dir[17] = {};
+  std::snprintf(xuid_dir, sizeof(xuid_dir), "%016llX",
+                static_cast<unsigned long long>(xuid));
+  char title_dir[9] = {};
+  std::snprintf(title_dir, sizeof(title_dir), "%08X", uint32_t(data.title_id));
+
+  std::error_code ec;
+  const auto package = nxe_storage::ContentRoot() / xuid_dir / title_dir / "00004000" /
+                       data.file_name();
+  // Either marker means the dashboard put it there: rom.txt for an Xbox 360
+  // game from the ROMs folder, pcgame.txt for an installed PC game.
+  return !std::filesystem::exists(package / "rom.txt", ec) &&
+         !std::filesystem::exists(package / "pcgame.txt", ec);
+}
+
 u32 ContentAggregateCreateEnumerator_entry(u64 xuid, u32 device_id, u32 content_type, u32 unk3,
                                            mapped_u32 handle_out) {
   (void)unk3;
@@ -243,6 +312,9 @@ u32 ContentAggregateCreateEnumerator_entry(u64 xuid, u32 device_id, u32 content_
       REXKRNL_INFO("ContentEnum: type {:#010x} title {:#010x} xuid {:#018x} -> {} item(s)",
                    content_type, resolved, xuid, content_datas.size());
       for (const auto& content_data : content_datas) {
+        if (SkipAsNotARom(xuid, content_data)) {
+          continue;
+        }
         if (auto* item = e->AppendItem()) {
           std::memset(item, 0, sizeof(*item));
           item->data = content_data;
@@ -263,6 +335,9 @@ u32 ContentAggregateCreateEnumerator_entry(u64 xuid, u32 device_id, u32 content_
         REXKRNL_INFO("ContentEnum: type {:#010x} title {:#010x} common       -> {} item(s)",
                      content_type, resolved, common_datas.size());
         for (const auto& content_data : common_datas) {
+          if (SkipAsNotARom(0, content_data)) {
+            continue;
+          }
           if (auto* item = e->AppendItem()) {
             std::memset(item, 0, sizeof(*item));
             item->data = content_data;
@@ -270,6 +345,52 @@ u32 ContentAggregateCreateEnumerator_entry(u64 xuid, u32 device_id, u32 content_
         }
       }
     }
+
+  // The account's own games, which have no package on this console.
+  //
+  // All Games is built from this enumeration grouped by title id, so a title
+  // with no package never reaches it however much the played-titles list knows
+  // about it -- which is why the library showed two games while the profile knew
+  // forty-seven.
+  //
+  // Only for an unfiltered enumeration of the hard drive. A caller asking for one
+  // content type, or for a specific device, is asking about packages, and these
+  // are not packages: nothing is written to the storage device and there is no
+  // file behind them. Anything that opens one will fail, which is the trade for
+  // having the list be right. library_synthesize_content = false turns it off.
+  if (REXCVAR_GET(library_synthesize_content) && content_type == kContentTypeAny &&
+      (!device_info || device_info->device_type == DeviceType::HDD)) {
+    size_t added = 0;
+    for (const auto& played : nxe_profile::PlayedTitles()) {
+      if (nxe_content::IsSystemTitleId(played.title_id) || played.name.empty()) {
+        continue;
+      }
+      if (std::find(title_ids.begin(), title_ids.end(), played.title_id) !=
+          title_ids.end()) {
+        continue;  // it has real content; that entry is the better one
+      }
+      auto* item = e->AppendItem();
+      if (!item) {
+        break;  // the enumerator is full
+      }
+      std::memset(item, 0, sizeof(*item));
+      item->data.device_id = kHardDriveDeviceId;
+      item->data.content_type = static_cast<XContentType>(kInstalledGameType);
+      item->data.title_id = played.title_id;
+      item->data.xuid = 0;
+      item->data.set_display_name(played.name);
+      // file_name locates a package on disk and there is no package. The title
+      // id is unique, and makes a failed lookup name the title it was for.
+      char file[16] = {};
+      std::snprintf(file, sizeof(file), "%08X", played.title_id);
+      item->data.set_file_name(file);
+      ++added;
+    }
+    if (added) {
+      REXKRNL_INFO("ContentEnum: {} title(s) from the profile history, no package staged",
+                   added);
+    }
+  }
   }
 
   *handle_out = e->handle();
@@ -279,6 +400,8 @@ u32 ContentAggregateCreateEnumerator_entry(u64 xuid, u32 device_id, u32 content_
 }
 
 }  // namespace
+
+
 
 namespace nxe_content {
 
@@ -306,37 +429,66 @@ std::vector<XCONTENT_AGGREGATE_DATA> AllInstalledContent() {
   return all;
 }
 
+
 uint32_t InstalledTitleCount() {
-  std::error_code ec;
-  const auto root = nxe_storage::ContentRoot();
-  if (!std::filesystem::exists(root, ec)) {
-    return 0;
+  // Ask the list, when there is one.
+  //
+  // Two implementations of "how many titles" drifted apart three times today:
+  // 48-against-49, then 71-against-70, then 26-against-54. Each time the fix
+  // was to make this walk match the other one more closely, and each time a
+  // later change moved them apart again. The only number that cannot disagree
+  // with the list is the list's own size.
+  //
+  // The walk below survives as the answer for the one moment it cannot be
+  // asked -- during profile load, before the kernel exists -- and is corrected
+  // by RepublishDerivedSettings once it can.
+  if (const uint32_t exact = EnumeratedTitleCount()) {
+    return exact;
   }
 
+  // The same disk, seen the same way the enumerator sees it.
+  //
+  // This used to walk every XUID directory with its own copy of the rule, while
+  // AllInstalledContent -- what the enumerator is built from -- looks only at
+  // XUID 0 and the signed-in user. That agreed for as long as the other
+  // directories held nothing but the dashboard's own content, and stopped
+  // agreeing the moment there were more games: 71 counted against 70
+  // enumerated.
+  //
+  // One off is not a cosmetic difference. The dashboard sizes the library from
+  // this number and fills it from the enumerator, and a walk that comes up
+  // short makes it discard the whole list -- see the note in installed_titles.h.
+  // So the count asks TitlesWithContent, exactly as the enumerator does.
+  //
+  // The signed-in XUID comes from the cvar rather than the kernel because this
+  // runs while the profile is still loading, long before there is a kernel to
+  // ask.
   std::vector<uint32_t> seen;
-  for (const auto& xuid_dir : std::filesystem::directory_iterator(root, ec)) {
-    if (!xuid_dir.is_directory(ec)) continue;
-    for (const auto& title_dir : std::filesystem::directory_iterator(xuid_dir.path(), ec)) {
-      if (!title_dir.is_directory(ec)) continue;
-      const std::string name = title_dir.path().filename().string();
-      if (!IsContentTypeDirName(name)) continue;
-
-      const auto title_id = static_cast<uint32_t>(std::stoul(name, nullptr, 16));
-      if (IsSystemTitleId(title_id)) continue;  // the console's own packages
-      if (std::find(seen.begin(), seen.end(), title_id) != seen.end()) continue;
-
-      // Only count it if something is actually staged underneath.
-      bool has_content = false;
-      for (const auto& type_dir : std::filesystem::directory_iterator(title_dir.path(), ec)) {
-        if (type_dir.is_directory(ec) && IsContentTypeDirName(type_dir.path().filename().string())) {
-          has_content = true;
-          break;
-        }
-      }
-      if (has_content) {
-        seen.push_back(title_id);
-      }
+  uint64_t user = 0;
+  {
+    const std::string text = rex::cvar::GetFlagByName("profile_xuid");
+    if (text.size() == 16) {
+      user = std::strtoull(text.c_str(), nullptr, 16);
     }
+  }
+  for (uint64_t who : {uint64_t(0), user}) {
+    for (uint32_t title_id : TitlesWithContent(who)) {
+      if (IsSystemTitleId(title_id)) continue;
+      if (std::find(seen.begin(), seen.end(), title_id) != seen.end()) continue;
+      seen.push_back(title_id);
+    }
+    if (!user) break;  // both passes would scan the same directory
+  }
+
+  // And the profile's history, which is the half the enumerator puts first.
+  //
+  // InstalledTitles() is history-then-content, so a title played on this
+  // account but never installed here is in the list and has to be in the count.
+  // Leaving it out is how this went from 71-against-70 to 26-against-54.
+  for (const auto& played : nxe_profile::PlayedTitles()) {
+    if (IsSystemTitleId(played.title_id)) continue;
+    if (std::find(seen.begin(), seen.end(), played.title_id) != seen.end()) continue;
+    seen.push_back(played.title_id);
   }
   return static_cast<uint32_t>(seen.size());
 }

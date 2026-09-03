@@ -73,6 +73,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "profile_list.h"
+
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
@@ -247,7 +249,21 @@ uint32_t ReadProfileSettings(uint32_t title_id, uint32_t user_index, uint32_t xu
     // from == 0 is the record's own way of saying "this one has no value".
     out_setting->from = !setting || !setting->is_set ? 0 : setting->is_title_specific() ? 2 : 1;
     if (xuids) {
-      out_setting->xuid = user_profile->xuid();
+      // Echo the XUID that was asked about, whatever it was.
+      //
+      // A caller that asks by XUID matches the records it gets back against the
+      // one it asked for, so the only answer that is always right is its own.
+      // UserProfile::xuid() was wrong because it is a placeholder matching
+      // nothing: the gamercard asked about E030000000A8C189, got six records
+      // belonging to B13EBABEBABEBABE and discarded all of them, drawing 0 G and
+      // no stars from values that had been served correctly.
+      //
+      // Answering with our own idea of the signed-in identity instead was no
+      // better, only wrong in the other direction: it is right for the caller
+      // asking about you and wrong for every caller asking about somebody else,
+      // and the Game Library asks about somebody else. Echoing costs nothing and
+      // cannot disagree with the question.
+      out_setting->xuid = static_cast<uint64_t>(xuids[0]);
     } else {
       out_setting->user_index = user_index;
     }

@@ -617,6 +617,20 @@ void RefreshAvatarSetting() {
   StoreAvatarSetting(profile, manifest);
 }
 
+// Defined below, next to the settings it publishes.
+void ApplyGamercardValues(UserProfile* profile);
+
+void RepublishDerivedSettings() {
+  auto* profile = REX_KERNEL_STATE()->user_profile();
+  if (profile) {
+    ApplyGamercardValues(profile);
+  }
+}
+
+void InvalidateCaches() {
+  g_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void SignOut() {
   if (g_active_xuid.empty()) {
     return;

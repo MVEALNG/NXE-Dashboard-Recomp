@@ -51,6 +51,7 @@
 // the whole user API surface, and nothing so far needs them to agree.
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 #include <rex/filesystem/vfs.h>
@@ -96,6 +97,37 @@ using namespace rex;
 
 REXCVAR_DECLARE(bool, profile_switch_restart);
 REXCVAR_DECLARE(std::string, profile_xuid);
+
+// Report the staged profile's own XUID as the signed-in identity.
+//
+// Off, because it is not finished. What it fixes is real: the runtime answers
+// XamUserGetXUID with UserProfile::xuid(), the hardcoded 0xB13EBABEBABEBABE,
+// while the profile enumerator lists the staged profile's E030000000A8C189. The
+// guest is told two different things about one person, and anything resolving
+// one against the other decides they are strangers -- which is exactly what the
+// gamer blade does. dash_2a57 (guest 0x921F6D58) fetches the signed-in XUID and
+// hands it to GamerRootScene; the scene cannot find that XUID among the
+// profiles, so it draws the panel a stranger gets: 0 G, Zone None, Offline, and
+// Add Friend / Compare Games. Every value it asked for was served correctly --
+// gamerscore 1000, rep 4.5 -- and it drew zeros anyway, because it never
+// believed the card was yours.
+//
+// It took two goes to land. The identity has to come from the profile_xuid cvar
+// rather than ProfileDirectory(), which would drive profile enumeration and
+// Account decryption from inside a kernel export before the guest has opened
+// anything; and this must answer X_E_* rather than X_ERROR_*, because
+// X_ERROR_NO_SUCH_USER is positive and dash_2a57 tests `>= 0`, so every failure
+// read as success and the guest carried on with a zero XUID. XamProfileOpen below
+// also had to compare against this identity rather than the placeholder, or the
+// start-up open looked like a request for somebody else and never mounted.
+//
+// On by default: DASHUSER: mounts, start-up is clean, and the avatar system comes
+// to life with it -- a run went from one 'Applied blend shape' line to thirty-five,
+// because the avatar is stored per profile and the profile can finally be found.
+REXCVAR_DEFINE_BOOL(profile_report_staged_xuid, true, "Profile",
+                    "Report the staged profile's own XUID from XamUserGetXUID and the profile "
+                    "enumerator, instead of the runtime's placeholder. Fixes the gamer blade "
+                    "showing a stranger's card.");
 REXCVAR_DECLARE(bool, signin_profiles_offline);
 REXCVAR_DECLARE(std::string, profile_switch_notify_ids);
 REXCVAR_DECLARE(int32_t, profile_switch_grace_seconds);
@@ -202,11 +234,52 @@ void FillProfileFrom(X_PROFILEENUMRESULT* out, const nxe_profile::StagedProfile&
   }
 }
 
+// The offline XUID of the profile actually signed in.
+//
+// UserProfile::xuid() is a hardcoded placeholder -- 0xB13EBABEBABEBABE, set in
+// the SDK's own user_profile.cpp -- and matches nothing on disk. The gamertag
+// beside it is already taken from the staged profile for exactly that reason;
+// this is the other half of the same fix.
+//
+// Leaving them apart tells the guest two different things about one person: the
+// profile enumerator lists E030000000A8C189 while XamUserGetXUID answers the
+// placeholder, so a XUID that came from one cannot be found by the other.
+// Anything that resolves the two against each other then concludes it is
+// looking at somebody else -- which is what the gamer blade did. dash_2a57
+// fetches the signed-in XUID and hands it to GamerRootScene, the scene looks it
+// up, finds no such profile, and draws the panel a stranger gets: 0 G, Zone
+// None, Offline, Add Friend / Compare Games. Every value it needed was being
+// served correctly; it just did not believe the card was yours.
+// Read from the cvar, not from ProfileDirectory().
+//
+// This is called from inside XamUserGetXUID, which the guest asks before it has
+// opened anything -- the very first thing it does with the answer is
+// XamProfileOpen(xuid, "DASHUSER"). ProfileDirectory() drives the whole profile
+// subsystem to answer: staged-profile enumeration, Account blob decryption and
+// the generation-scoped caches around them. Reaching all of that from a kernel
+// export that early stopped the guest before it ever reached XamProfileOpen, so
+// DASHUSER: was never mounted and everything reading through it followed it
+// down. profile_xuid is the same value as a plain string and costs nothing.
+uint64_t ActiveXuidImpl() {
+  if (!REXCVAR_GET(profile_report_staged_xuid)) {
+    const auto& runtime = REX_KERNEL_STATE()->user_profile();
+    return runtime ? runtime->xuid() : 0;
+  }
+  const std::string& text = REXCVAR_GET(profile_xuid);
+  if (text.size() == 16) {
+    char* end = nullptr;
+    const uint64_t xuid = std::strtoull(text.c_str(), &end, 16);
+    if (end && *end == 0 && xuid) return xuid;
+  }
+  const auto& profile = REX_KERNEL_STATE()->user_profile();
+  return profile ? profile->xuid() : 0;
+}
+
 void FillProfile(X_PROFILEENUMRESULT* out) {
   std::memset(out, 0, sizeof(*out));
 
   const auto& profile = REX_KERNEL_STATE()->user_profile();
-  const uint64_t xuid = profile ? profile->xuid() : 0;
+  const uint64_t xuid = ActiveXuidImpl();
   // Prefer the gamertag decrypted out of the Account blob; UserProfile's own
   // name is a hardcoded placeholder.
   std::string name = nxe_profile::GamerTag();
@@ -408,12 +481,77 @@ std::string GuestAnsi(uint8_t* base, uint32_t addr, size_t max_len = 64) {
 
 }  // namespace
 
+// XamUserGetXUID(user_index, type_mask, out) -- who is signed in.
+//
+// Replaced rather than left to the runtime, which answers UserProfile::xuid():
+// the placeholder, which is not any profile on this disk. See ActiveXuid above
+// for what that cost.
+//
+// The shape follows the runtime's own export so nothing else changes: only user
+// 0 is signed in, an index past three is a bad argument, and the online XUID is
+// preferred when asked for, because a non-zero one is what marks the account as
+// a LIVE one. type_mask 1 is the offline XUID, which is what the gamer blade
+// asks for -- dash_2a57(1) at guest 0x921F6D58.
+REX_HOOK_RAW(__imp__XamUserGetXUID) {
+  const uint32_t user_index = ctx.r3.u32;
+  const uint32_t type_mask = ctx.r4.u32;
+  const uint32_t out = ctx.r5.u32;
+
+  if (!out) {
+    ctx.r3.u64 = X_E_INVALIDARG;
+    return;
+  }
+
+  // Deliberately the runtime's own shape, with one value changed.
+  //
+  // An earlier attempt rewrote the logic as well and answered the derived LIVE
+  // XUID whenever the mask asked for an online one. That is not what the runtime
+  // does -- UserProfile::type() is the constant 1 | 2, so both of its branches
+  // hand back the same XUID and online and offline are never told apart -- and
+  // the startup call, whose mask has bit 2 set, came back 0009BABEBABEBABE:
+  // nxe_live::OnlineXuid() derives that from the placeholder when the profile has
+  // no LIVE identity of its own. The guest was handed an identity that had never
+  // existed and crashed shortly after.
+  // HRESULTs, not Win32 codes. X_ERROR_NO_SUCH_USER is 0x459 and positive, so a
+  // caller testing `>= 0` -- which dash_2a57 does -- reads every failure as
+  // success and carries on with the zero XUID this writes out. That is what
+  // XamUserGetOnlineCountryFromXUID(0x0) in the log was, and the guest did not
+  // survive much past it. The runtime's own export returns X_E_*; so does this.
+  uint32_t result = X_E_NO_SUCH_USER;
+  uint64_t xuid = 0;
+  if (user_index >= 4) {
+    result = X_E_INVALIDARG;
+  } else if (user_index == 0) {
+    const auto& profile = REX_KERNEL_STATE()->user_profile();
+    const uint32_t type = (profile ? profile->type() : 0u) & type_mask;
+    if (type & (2 | 4 | 1)) {
+      xuid = ActiveXuidImpl();
+      result = X_ERROR_SUCCESS;
+    }
+  }
+  StoreBe64(base + out, xuid);
+  ctx.r3.u64 = result;
+
+  static uint64_t s_said = 0;
+  if (xuid && s_said != xuid) {
+    s_said = xuid;
+    REXKRNL_INFO("XamUserGetXUID: the signed-in user is {:016X}", xuid);
+  }
+}
+
 REX_HOOK_RAW(__imp__XamProfileOpen) {
   const uint64_t xuid = ctx.r3.u64;
   const std::string name = GuestAnsi(base, ctx.r4.u32);
 
   const auto& profile = REX_KERNEL_STATE()->user_profile();
-  const uint64_t expected = profile ? profile->xuid() : 0;
+  // ActiveXuidImpl(), not profile->xuid(): whatever identity is being reported is the
+  // one an open of the signed-in profile arrives with. Comparing against the
+  // runtime's placeholder while reporting the staged XUID made the start-up open
+  // of DASHUSER look like a request for some other profile, so it took the branch
+  // below -- which answers success and deliberately does not mount, because it was
+  // written for reading a profile from the Sign In list. Nothing was mounted, and
+  // every read through DASHUSER: afterwards failed.
+  const uint64_t expected = ActiveXuidImpl();
 
   REXKRNL_INFO("XamProfileOpen({:016X}, '{}')", xuid, name);
 
@@ -704,3 +842,10 @@ REX_EXPORT(__imp__XamProfileCreateEnumerator, XamProfileCreateEnumerator_entry)
 REX_EXPORT(__imp__XamProfileEnumerate, XamProfileEnumerate_entry)
 static rex::ppc::detail::PPCFuncRegistrar _reg_xam_profile_open(
     "__imp__XamProfileOpen", &__imp__XamProfileOpen);
+
+// Shared with profile_read.cpp, which stamps each returned settings record with
+// the XUID it belongs to. That has to be the same identity reported everywhere
+// else, or the gamercard discards its own values -- see the note there.
+namespace nxe_profile {
+uint64_t ActiveXuid() { return ActiveXuidImpl(); }
+}  // namespace nxe_profile

@@ -36,8 +36,11 @@
 // independently parsed layouts landing that close is what says the offsets
 // above are right; tools/profile_summary.py reports both.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -45,8 +48,32 @@
 
 #include <rex/logging.h>
 
+#include <rex/cvar.h>
+
+#include "install_paths.h"
 #include "played_titles.h"
 #include "profile_list.h"
+
+// Games from Xbox LIVE, merged into the profile's own history.
+//
+// The history in the GPD is what this console has played: two titles. The
+// account has played 47, and titlehub knows all of them with their achievement
+// counts and gamerscore. Merging them here rather than showing them somewhere
+// else puts them in the Game Library itself -- the same list, the same records,
+// the same achievement columns -- because PlayedTitles() is where the library is
+// built from.
+//
+// It also keeps the count honest. The library asks for 0x10040004 and then asks
+// the enumerator for that many titles, and the two disagreeing is what the note
+// in profile_read.cpp warns about; both come off this list, so they cannot.
+//
+// The GPD wins on a title both know. It is the console's own record, and it is
+// the one with per-achievement detail behind it.
+REXCVAR_DEFINE_STRING(library_list, "gamedir/library.txt", "Dashboard",
+                      "Pipe-delimited games to merge into the Game Library: "
+                      "titleid|name|earned|possible|gamerscore|total|filetime|platform, "
+                      "one per line, # for comments. Empty merges nothing. "
+                      "tools/fetch_title_stats.py writes it.");
 
 namespace nxe_profile {
 
@@ -89,6 +116,71 @@ std::vector<uint8_t> ReadFile(const std::filesystem::path& path) {
   }
   std::fclose(f);
   return data;
+}
+
+// Add the titles in library_list that the GPD did not already account for.
+//
+// Deduplicated by title id, and the GPD entry is kept when both have one: the
+// console's own record is the one with a per-title GPD behind it, so replacing it
+// would trade real achievement detail for a summary.
+void MergeFromFile(std::vector<PlayedTitle>& titles) {
+  const std::string setting = REXCVAR_GET(library_list);
+  if (setting.empty()) {
+    return;
+  }
+  const auto path = nxe_paths::Resolve(setting);
+  std::ifstream file(path);
+  if (!file) {
+    REXLOG_INFO("Played titles: no library list at {}", path.string());
+    return;
+  }
+
+  std::vector<uint32_t> known;
+  known.reserve(titles.size());
+  for (const auto& title : titles) {
+    known.push_back(title.title_id);
+  }
+
+  std::string line;
+  size_t added = 0;
+  while (std::getline(file, line)) {
+    while (!line.empty() && (line.back() == 13 || line.back() == 10)) line.pop_back();
+    const size_t first = line.find_first_not_of(" \t");
+    if (first == std::string::npos || line[first] == 35) continue;  // 35 == '#'
+
+    std::string field[8];
+    size_t at = 0;
+    for (int i = 0; i < 8 && at <= line.size(); ++i) {
+      const size_t bar = line.find(124, at);  // 124 == '|'
+      field[i] = line.substr(at, bar == std::string::npos ? std::string::npos : bar - at);
+      if (bar == std::string::npos) break;
+      at = bar + 1;
+    }
+    if (field[0].empty() || field[1].empty()) continue;
+
+    PlayedTitle title;
+    title.title_id = uint32_t(std::strtoul(field[0].c_str(), nullptr, 16));
+    if (!title.title_id) continue;
+    if (std::find(known.begin(), known.end(), title.title_id) != known.end()) continue;
+
+    title.achievements_earned = uint32_t(std::strtoul(field[2].c_str(), nullptr, 10));
+    title.achievements_possible = uint32_t(std::strtoul(field[3].c_str(), nullptr, 10));
+    title.gamerscore_earned = uint32_t(std::strtoul(field[4].c_str(), nullptr, 10));
+    title.gamerscore_total = uint32_t(std::strtoul(field[5].c_str(), nullptr, 10));
+    title.last_played = std::strtoull(field[6].c_str(), nullptr, 10);
+    // The name is UTF-8 on disk and UTF-16 in the record. Everything past the
+    // ASCII range is dropped to a question mark rather than mangled: a title
+    // name is a label here, and half a codepoint would draw as a box.
+    for (unsigned char ch : field[1]) {
+      title.name.push_back(ch < 0x80 ? char16_t(ch) : char16_t(63));
+    }
+    known.push_back(title.title_id);
+    titles.push_back(std::move(title));
+    ++added;
+  }
+  if (added) {
+    REXLOG_INFO("Played titles: {} more from {}", added, path.string());
+  }
 }
 
 std::vector<PlayedTitle> Parse() {
@@ -149,6 +241,8 @@ std::vector<PlayedTitle> Parse() {
 
     titles.push_back(std::move(title));
   }
+
+  MergeFromFile(titles);
 
   uint32_t earned = 0;
   uint32_t score = 0;

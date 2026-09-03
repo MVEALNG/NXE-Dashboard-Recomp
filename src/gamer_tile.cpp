@@ -29,6 +29,8 @@
 // same ordering is used here. If tiles ever come out with swapped channels this
 // is the one line to change -- the shuffle in WritePixels -- not the decode.
 
+#include "gamer_picture.h"
+
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -599,3 +601,59 @@ REX_HOOK_RAW(__imp__XamReadTile) {
   }
   ctx.r3.u64 = result;
 }
+
+// Choosing a gamer picture; see gamer_picture.h.
+//
+// The package is found the way LoadProfilePng finds it -- walking the content
+// root for <XUID>/FFFE07D1/00010000/<package> -- because that is the layout the
+// profile is actually stored in, and there is only ever one of them here.
+namespace nxe_tiles {
+
+bool SetGamerPicture(const std::filesystem::path& source_dir, const std::string& file_name) {
+  const auto source = source_dir / file_name;
+  std::error_code ec;
+  if (!std::filesystem::exists(source, ec)) {
+    REXKRNL_WARN("Gamer picture: no such file {}", source.string());
+    return false;
+  }
+
+  const auto root = nxe_storage::ContentRoot();
+  if (!std::filesystem::exists(root, ec)) return false;
+
+  bool wrote = false;
+  for (const auto& xuid_dir : std::filesystem::directory_iterator(root, ec)) {
+    if (!xuid_dir.is_directory(ec)) continue;
+    const auto profiles = xuid_dir.path() / "FFFE07D1" / "00010000";
+    if (!std::filesystem::exists(profiles, ec)) continue;
+    for (const auto& pkg : std::filesystem::directory_iterator(profiles, ec)) {
+      if (!pkg.is_directory(ec)) continue;
+
+      std::filesystem::copy_file(source, pkg.path() / "tile_64.png",
+                                 std::filesystem::copy_options::overwrite_existing, ec);
+      if (ec) {
+        REXKRNL_WARN("Gamer picture: could not write {}: {}",
+                     (pkg.path() / "tile_64.png").string(), ec.message());
+        ec.clear();
+        continue;
+      }
+
+      // The small copy, when the dump has one. Failing that the 64px picture
+      // stands in for both, which is better than leaving the old one behind.
+      auto small = source;
+      if (file_name.rfind("64_", 0) == 0) {
+        const auto candidate = source_dir / ("32_" + file_name.substr(3));
+        if (std::filesystem::exists(candidate, ec)) small = candidate;
+      }
+      std::filesystem::copy_file(small, pkg.path() / "tile_32.png",
+                                 std::filesystem::copy_options::overwrite_existing, ec);
+      ec.clear();
+
+      REXKRNL_WARN("Gamer picture: {} -> {}", file_name, pkg.path().string());
+      wrote = true;
+    }
+  }
+  if (!wrote) REXKRNL_WARN("Gamer picture: no profile package under {}", root.string());
+  return wrote;
+}
+
+}  // namespace nxe_tiles

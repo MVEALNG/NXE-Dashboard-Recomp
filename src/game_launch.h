@@ -27,6 +27,14 @@ std::filesystem::path PackagePathForTitle(uint32_t title_id);
 // disc, or nothing staged for it.
 bool LaunchDiscTitle(PPCContext& ctx, uint8_t* base);
 
+// Run a title that is staged in storage, by id. False when it is not installed,
+// has no executable, or there is no emulator configured.
+//
+// This is what a marketplace tile calls: the row knows a game's title id, and a
+// title id is exactly what names its folder under the content root, so a game
+// that is actually here can be played from the store page that advertises it.
+bool LaunchStagedTitle(PPCContext& ctx, uint8_t* base, uint32_t title_id);
+
 // Put the dashboard's UI back after a launch that returned.
 //
 // The disc tile tears its UI down before launching and never restores, because

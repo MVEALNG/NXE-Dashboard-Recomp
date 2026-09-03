@@ -5,6 +5,7 @@
 #pragma once
 
 #include <rex/rex_app.h>
+#include <rex/ui/keybinds.h>
 #include <rex/filesystem/vfs.h>
 #include <rex/filesystem.h>
 #include <rex/filesystem/devices/host_path_device.h>
@@ -18,6 +19,12 @@ REXCVAR_DECLARE(std::string, disc_title);
 #include "discord_presence.h"
 #include "game_launch.h"
 #include "storage_device.h"
+#include "library_refresh.h"
+#include "pc_library.h"
+#include "rom_library.h"
+#include "disc_dialog.h"
+#include "first_run.h"
+#include "setup_check.h"
 
 // Defined by the SDK's avatar pipeline (kernel/xam/xam_avatar.cpp). It looks
 // for AvatarAssetPack.toc here, falling back to the game_data_root *cvar* --
@@ -78,9 +85,87 @@ class NxeDashApp : public rex::ReXApp {
   // Rich presence starts here rather than at construction: it reads its
   // application id from a cvar, and cvars are not settled until setup has run.
   // With no id configured this returns immediately and costs nothing.
+  // Held for the life of the app: the dialog closes itself once answered.
+  rex::ui::ImGuiDrawer* drawer_ = nullptr;
+  std::unique_ptr<rex::ui::ImGuiDialog> first_run_;
+  std::unique_ptr<rex::ui::ImGuiDialog> disc_dialog_;
+
   void OnShutdown() override { nxe_discord::Stop(); }
 
+  // Ask, once, for the folders this cannot ship.
+  //
+  // OnCreateDialogs is the SDK's own hook for an app to add its overlays, so
+  // this needs no changes to the runtime -- it appears the same way the F4
+  // settings overlay does, over whatever the dashboard is drawing.
+  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    drawer_ = drawer;
+    first_run_ = nxe_setup::MakeFirstRunDialog(
+        drawer, std::filesystem::current_path() / "NXE.toml");
+  }
+
   void OnPostSetup() override {
+    // What this install still needs pointing at, said once and early.
+    //
+    // Here rather than earlier because paths are configured by now, so a
+    // relative setting is judged against the root it will actually be read
+    // from. Nothing is required except storage: a first run with none of the
+    // rest set still reaches the blade, with those parts simply empty.
+    nxe_setup::Report();
+
+    // Games sitting in the ROMs folder, staged before the library is asked
+    // for. Somebody who has just pointed roms_dir at their collection should
+    // find it on the shelf, not have to discover a keybind first. Idempotent:
+    // a game already staged and still where it was is left alone.
+    nxe_roms::StageAll();
+    nxe_pc::StageAll();
+
+    // Pick up a game installed while the dashboard is running.
+    //
+    // A keybind rather than a menu item: nothing in this project builds a
+    // native menu, SetMainMenu has never been called, and a menu bar over a
+    // full-screen console UI would be wrong even if it drew. This registers
+    // like the SDK's own overlays do, so it appears in the settings overlay
+    // under Input/Keybinds/System and can be rebound there.
+    //
+    // The guest is not told. It asks for the library when that screen opens,
+    // so the new list is there the next time it is opened rather than
+    // changing underneath somebody reading it.
+    // F7 was the SDK's achievements overlay, which serves its own achievement
+    // system rather than the guest's and shows nothing here. It is moved rather
+    // than shadowed: two binds on one key both fire, and a dialog that opens
+    // alongside something else is worse than either alone. Rebind either in the
+    // settings overlay under Input/Keybinds/System.
+    rex::cvar::SetFlagByName("bind_achievements", "F9");
+
+    rex::ui::RegisterBind("bind_setup", "F7", "Set up the dashboard", [this] {
+      if (first_run_) {
+        first_run_.reset();
+      } else {
+        first_run_ = nxe_setup::MakeSetupDialog(
+            drawer_, std::filesystem::current_path() / "NXE.toml");
+      }
+    });
+
+    rex::ui::RegisterBind("bind_disc", "F8", "Disc drive and profiles", [this] {
+      if (disc_dialog_) {
+        disc_dialog_.reset();
+      } else {
+        disc_dialog_ = nxe_disc::MakeDiscDialog(
+            drawer_, std::filesystem::current_path() / "NXE.toml");
+      }
+    });
+
+    rex::ui::RegisterBind("bind_refresh_library", "F6",
+                          "Refresh the game library after installing a game", [] {
+                            const auto result = nxe_library::Refresh();
+                            REXLOG_INFO(
+                                "Library refresh: requested from the keyboard; "
+                                "{} title(s){}",
+                                result.titles_after,
+                                result.changed() ? " -- reopen the Game Library to see them"
+                                                 : "");
+                          });
+
     nxe_discord::Start();
 
     // Vertical sync, applied here because this is the first point at which the

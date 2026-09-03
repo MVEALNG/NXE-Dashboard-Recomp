@@ -48,15 +48,25 @@
 // dashboard, so they are only logged while a theme navigation is actually on the
 // stack. The flag is thread-local and set by the two entry points above.
 
+#include <windows.h>  // VirtualQuery, to refuse a write into memory that is not ours
+
 #include <cstdint>
+#include <filesystem>
 #include <set>
 #include <string>
 
 #include <rex/hook.h>
+
+#include "blade_nav.h"
+#include "channel_pages.h"
 #include <rex/logging.h>
 #include <rex/ppc.h>
 #include <rex/types.h>
 #include "discord_presence.h"
+#include "install_paths.h"
+#include "profile_list.h"
+
+REXCVAR_DECLARE(std::string, disc_title);
 #include "profile_list.h"
 
 using namespace rex;
@@ -132,8 +142,29 @@ void sub_921F6190(PPCContext& __restrict ctx, uint8_t* base) {
   const std::string scene = Wide(base, ctx.r5.u32, 64);
   const bool theme = scene.find("Themes") != std::string::npos;
 
-  REXKRNL_WARN("[theme] navigate container='{}' scene='{}' nav={:#x} from caller {:#010x}",
-               container, scene, ctx.r3.u32, ctx.lr);
+  // r6/r7 are the two arguments a scene is parameterised with, and r8 is where
+  // the navigator it made is written back. They matter: pushing GamerRootScene
+  // with both zero brings the blade up bound to nobody -- 0 G, Zone None, and
+  // the Add Friend / Compare Games panel a stranger's gamercard gets, rather
+  // than your own profile menu. The dashboard sets them, so they are logged
+  // here to be copied rather than guessed.
+  REXKRNL_WARN("[theme] navigate container='{}' scene='{}' nav={:#x} "
+               "a4={:#x} a5={:#x} out={:#x} from caller {:#010x}",
+               container, scene, ctx.r3.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.lr);
+
+  // Keep the descriptor the dashboard opens gamer.xzp with, so the Profile item
+  // can open the same scene bound to the same person. See blade_nav.h.
+  if (ctx.r6.u32 && container.find("amer") != std::string::npos) {
+    nxe_blade::NoteGamerParam(ctx, base, ctx.r6.u32);
+  }
+
+  // When a4 points at something, the first few words of it say what.
+  if (ctx.r6.u32) {
+    REXKRNL_WARN("[theme]   a4 {:#x}: {:#010x} {:#010x} {:#010x} {:#010x}  (as text '{}')",
+                 ctx.r6.u32, Be32(base, ctx.r6.u32), Be32(base, ctx.r6.u32 + 4),
+                 Be32(base, ctx.r6.u32 + 8), Be32(base, ctx.r6.u32 + 12),
+                 Wide(base, ctx.r6.u32, 32));
+  }
 
   // Sign-in offers are only acted on while the chooser is the current scene.
   nxe_profile::NoteSceneOpened(container);
@@ -190,6 +221,8 @@ void sub_9218F518(PPCContext& __restrict ctx, uint8_t* base) {
 void sub_9218FA60(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t nav = ctx.r3.u32;
   const uint32_t scene = ctx.r5.u32;
+  // The navigator a page of ours has to be pushed onto; see channel_pages.h.
+  nxe_channels::NoteNavigator(nav);
   __imp__sub_9218FA60(ctx, base);
   if (t_in_theme) {
     if (Result(ctx) >= 0) {
@@ -465,6 +498,44 @@ bool RewriteEmptyImageUrl(uint8_t* base, uint32_t address, const std::string& ur
     return false;
   }
 
+  // And the buffer has to be somewhere we may actually write.
+  //
+  // The size check above bounds how much is written; nothing bounded where. That
+  // is not a theoretical gap: entering the Game Library and choosing All Games
+  // arrived here with address = 0x80070057 -- E_INVALIDARG, the value this very
+  // path returns and logs all day as
+  //
+  //     [theme] load 'memory://40741696,0' -> 0x80070057
+  //
+  // A caller handed a failed result along where a pointer was expected, and
+  // guest_base + 0x80070057 is a real address in the guest reservation, readable
+  // enough for the URL to be read back out of it and matched, so every check
+  // above passed. The write then landed on a page that is not writable and took
+  // the process down with an access violation at 0x180070057.
+  //
+  // Asking the OS is the only answer that holds: a guest pointer cannot be told
+  // from an HRESULT by its value -- 0x80070057 sits squarely in the range the
+  // guest images occupy -- so the range it is in proves nothing and only the
+  // page protection does. Refusing leaves the URL as it was, which is what
+  // happens for every URL this declines to rewrite anyway.
+  MEMORY_BASIC_INFORMATION info{};
+  void* target = base + address;
+  const size_t bytes = (text_out.size() + 1) * sizeof(uint16_t);
+  const DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE |
+                         PAGE_EXECUTE_WRITECOPY;
+  if (!VirtualQuery(target, &info, sizeof(info)) || info.State != MEM_COMMIT ||
+      !(info.Protect & writable) ||
+      reinterpret_cast<uintptr_t>(target) + bytes >
+          reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize) {
+    static bool s_refused = false;
+    if (!s_refused) {
+      s_refused = true;
+      REXKRNL_WARN("[theme] refused to rewrite '{}' at {:#x}: not writable", url,
+                   address);
+    }
+    return false;
+  }
+
   auto* text = reinterpret_cast<rex::be<uint16_t>*>(base + address);
   for (size_t i = 0; i < text_out.size(); ++i) {
     text[i] = static_cast<uint16_t>(text_out[i]);
@@ -514,7 +585,35 @@ void sub_921C2850(PPCContext& __restrict ctx, uint8_t* base) {
   //
   // Everything else keeps the placeholder, so the freeze fix stands where it
   // was actually needed.
-  static const std::string kDiscArt = "file://media:/disc.png";
+  // The cover for whatever is actually in the drive.
+  //
+  // This was one fixed file, so every game wore the same box art -- Batman went
+  // in the drive, the tile said "Play Batman: AA GOTY" and drew Halo 3. The name
+  // came from the title id and the picture did not.
+  //
+  // Per-title art is safe here where it would not be for the inset: the cover
+  // URL is built into a 0x104-wide-character buffer (kDiscArtBufferChars), while
+  // the inset has only the 19 characters of "memory://XXXXXXXX,0" to write back
+  // into. So the cover gets a real path and the inset keeps the placeholder.
+  //
+  // Checked on disk first, and deliberately: a memory:// load the shell refuses
+  // is retried every frame for ever, which is the retry storm that froze the
+  // dashboard when the game rows had no artwork. Pointing at a file that is not
+  // there would be that same bug. No art means the old placeholder, which draws
+  // a plain disc rather than somebody else's game.
+  static const std::string kDiscFallback = "file://media:/disc.png";
+  std::string disc_art = kDiscFallback;
+  {
+    const std::string wanted = REXCVAR_GET(disc_title);
+    if (wanted.size() == 8) {
+      const std::string relative = "images/games/" + wanted + ".png";
+      std::error_code ec;
+      if (std::filesystem::exists(nxe_paths::Resolve("gamedir/" + relative), ec)) {
+        disc_art = "file://media:/" + relative;
+      }
+    }
+  }
+  const std::string& kDiscArt = disc_art;
   const uint32_t caller = static_cast<uint32_t>(ctx.lr);
   const bool is_inset = caller >= kDiscArtStart && caller < kDiscArtEnd;
   const bool is_cover = caller >= kDiscIconStart && caller < kDiscIconEnd;

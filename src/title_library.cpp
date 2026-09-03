@@ -175,6 +175,8 @@ uint64_t FileTimeFor(const rex::system::xam::XCONTENT_AGGREGATE_DATA& content) {
 // The profile's history comes first and is authoritative: it is where the
 // achievement counts, the gamerscore and the real title names live. Installed
 // content then fills in anything the history does not mention.
+std::vector<X_TITLE_PLAYED> InstalledTitles();
+
 std::vector<X_TITLE_PLAYED> InstalledTitles() {
   std::vector<X_TITLE_PLAYED> titles;
 
@@ -453,3 +455,17 @@ std::u16string NameFor(uint32_t title_id) { return LookupTitleNameImpl(title_id)
 
 REX_EXPORT(__imp__XamIsSystemTitleId, XamIsSystemTitleId_entry)
 REX_EXPORT(__imp__XamGetCachedTitleName, XamGetCachedTitleName_entry)
+
+namespace nxe_content {
+
+uint32_t EnumeratedTitleCount() {
+  // Not reachable until the kernel is up: InstalledTitles reads the content
+  // manager and the signed-in profile. Before that the caller has to make do
+  // with a filesystem estimate.
+  if (!REX_KERNEL_STATE()) {
+    return 0;
+  }
+  return static_cast<uint32_t>(InstalledTitles().size());
+}
+
+}  // namespace nxe_content

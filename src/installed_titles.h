@@ -40,4 +40,12 @@ inline bool IsSystemTitleId(uint32_t title_id) {
 // needed while the profile is loading, long before either exists.
 uint32_t InstalledTitleCount();
 
+// How many titles the enumerator will actually hand back.
+//
+// The number that matters, and the only one guaranteed to match the list: it
+// is that list's size. Needs the kernel, so it is unavailable while the
+// profile is first loading -- returns 0 then, and InstalledTitleCount falls
+// back to counting the disk.
+uint32_t EnumeratedTitleCount();
+
 }  // namespace nxe_content
