@@ -165,6 +165,12 @@ updates:
 - The Video Library does not work yet.
 - The Music Library opens, but its functionality is not working yet.
 - The Picture Library opens, but its functionality is not working yet.
+- Windows Media Center works, but cannot connect because Xbox Live is not fully
+	connected to that part of the dashboard yet.
+- Changing the display resolution in Settings currently has no effect.
+- Spotlight navigation is incomplete. Most items do not respond, and opening
+	Demos redirects to the Game Library; backing out from there can freeze the
+	application.
 
 ## Licence
 
