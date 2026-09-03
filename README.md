@@ -126,10 +126,12 @@ The Game Library can contain both Xbox 360 and PC games:
 
 | Key | Action |
 | --- | --- |
-| `F7` | Opens the setup window. Add directories, import Xenia profiles, and sync a Microsoft account. |
-| `F8` | Opens the Game Library menu. Shows loaded games, profiles, PC games, and Xbox 360 ROMs. |
-| `F4` | Opens the debug menu. |
-| `F9` | Opens achievements. |
+| `F3` | Opens the Debug Overlay. |
+| `F4` | Opens the Settings Menu. |
+| `F6` | Refreshes the Game Library. |
+| `F7` | Opens the Dashboard Setup. |
+| `F8` | Opens the Disc Drive and Profiles. |
+| `F9` | Opens Achievements. |
 
 ## Data tools
 
