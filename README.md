@@ -153,6 +153,19 @@ TMDB key in `tools/.tmdb_key`. Both files are ignored by Git and must never be
 committed. Review each script's `-help` output for source and destination
 overrides before importing data.
 
+## Features
+
+- Real Friends Activity from Xbox
+- Working Xbox Marketplace
+- Updated movie and TV show catalog
+- Complete Xbox 360 game catalog in the Marketplace
+- Switchable DVD game with working cover art. Use `F8` to switch titles.
+- Real Xbox 360 channels
+- Working game metadata
+- NXE Game Marketplace category artwork
+- Working Xbox 360 NXE Spotlight
+- Preserved game and video Marketplace
+
 ## State of things
 
 Working: boot, themes, profile and gamercard, the game library with real sizes
@@ -169,6 +182,13 @@ runtime's heap, so it remains behind `guide_enable` for now.
 The following issues are currently being worked on and will be fixed in future
 updates:
 
+- The Guide is entirely non-functional. Do not enable it in Debug because it
+  will crash the application.
+- Do not enable `gamer_tile_decoded`. It disables profile features, including
+  access to the Avatar Editor.
+- The Profile button in the Profile section is not functional. It was an
+  attempt to open the Guide and now opens a screen that cannot be exited. Do
+  not press Profile when opening the Profile section.
 - Exiting the Game Library can freeze the application.
 - The Video Library does not work yet.
 - The Music Library opens, but its functionality is not working yet.
