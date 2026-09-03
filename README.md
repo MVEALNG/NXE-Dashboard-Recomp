@@ -60,8 +60,8 @@ Generate the recompiled sources from your dump, then build:
 
 ```
 rexglue codegen nxe_dash_manifest.toml
-cmake --preset win-amd64-debug
-cmake --build out/build/win-amd64-debug --target nxe_dash
+cmake -preset win-amd64-debug
+cmake -build out/build/win-amd64-debug -target nxe_dash
 ```
 
 `nxe_dash_manifest.toml` points at the dump; edit its paths to match yours.
