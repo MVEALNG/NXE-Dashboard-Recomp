@@ -1,3 +1,7 @@
+<p align="center">
+	<img src="docs/xbox-logo.png" alt="Xbox logo" width="180">
+</p>
+
 # NXE Dashboard Recompilation
 
 A static recompilation of the Xbox 360 NXE dashboard (2.0.9199.0) to native
