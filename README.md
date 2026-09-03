@@ -4,11 +4,11 @@
 
 # NXE Dashboard Recompilation
 
-A static recompilation of the Xbox 360 NXE dashboard (2.0.9199.0) to native
+A static recompilation of the Xbox 360 NXE dashboard (2.0.9199.0) for native
 Windows, built on the [ReXGlue](https://github.com/) SDK. The dashboard's
-PowerPC code is translated to C++ ahead of time; the code in `src/` is the layer
-that makes it run on a PC — kernel hooks, storage, profiles, the game library,
-launching titles, and the parts of the shell that have no PC equivalent.
+PowerPC code is translated to C++ ahead of time. The code in `src/` is the
+practical layer around it: kernel hooks, storage, profiles, the game library,
+title launching, and the pieces of the shell that have no PC equivalent.
 
 ## What this repository does not contain
 
@@ -19,10 +19,10 @@ own files:
 - Your own Xbox 360 profile and content, if you want your gamertag and saves
 - Cover art and icons for your own games
 
-`generated/` — the several hundred megabytes of C++ that rexglue produces from
-`$flash_dash.xex` — is deliberately not committed. It is derived from
-Microsoft's executable, and it is reproducible in one command from a dump you
-already have.
+`generated/` contains the several hundred megabytes of C++ that ReXGlue
+produces from `$flash_dash.xex`. It is deliberately not committed because it is
+derived from Microsoft's executable. Anyone with their own dump can reproduce
+it with one command.
 
 ## Prerequisites
 
@@ -68,9 +68,9 @@ cmake --build out/build/win-amd64-debug --target nxe_dash
 
 ## Laying out the data
 
-Paths are resolved against the **installation root** — the directory the
-executable sits in, unless `nxe_root` says otherwise. A working install looks
-like:
+Paths are resolved against the **installation root**, meaning the directory
+that contains the executable unless `nxe_root` says otherwise. A working
+installation looks like this:
 
 ```
 NXE.exe
@@ -115,12 +115,12 @@ themes, avatar data, staged games, artwork, and optional launch helpers.
 The Game Library can contain both Xbox 360 and PC games:
 
 - Put Xbox 360 game folders containing `default.xex` under `roms_dir`, then
-	refresh the library. The title ID is read from the XEX execution metadata;
-	the game is staged without copying its files.
+  refresh the library. The title ID is read from the XEX execution metadata;
+  the game is staged without copying its files.
 - Point `full_games_dir` at a folder of PC game directories or a Steam library.
-	Steam manifests are read for names and app IDs; ordinary folders use a
-	detected executable. PC titles launch directly, while Xbox 360 titles use
-	`game_emulator`.
+  Steam manifests are read for names and app IDs; ordinary folders use a
+  detected executable. PC titles launch directly, while Xbox 360 titles use
+  `game_emulator`.
 
 ## Keybinds
 
@@ -160,9 +160,9 @@ and artwork, achievements with icons, launching titles through an emulator and
 returning, the disc tile with cover art, Discord rich presence.
 
 Partial: the Guide. Pressing Messages opens a real dashboard scene rather than
-XAM's Guide — the authentic blades live in `huduiskin.xex`, which this runtime
+XAM's Guide. The authentic blades live in `huduiskin.xex`, which this runtime
 cannot decrypt. Running real XAM gets through start-up but corrupts the
-runtime's heap, so it stays behind `guide_enable`.
+runtime's heap, so it remains behind `guide_enable` for now.
 
 ## Known issues
 
