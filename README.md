@@ -150,7 +150,7 @@ python tools/import_genre_cards.py
 Run individual `fetch_*.py` scripts when only one data set is needed. The Xbox
 Live token is cached in `tools/.xbl_token.json`; the video importer can use a
 TMDB key in `tools/.tmdb_key`. Both files are ignored by Git and must never be
-committed. Review each script's `--help` output for source and destination
+committed. Review each script's `-help` output for source and destination
 overrides before importing data.
 
 ## State of things
